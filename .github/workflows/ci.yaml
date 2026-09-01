@@ -1,0 +1,37 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  ocb-build:
+    name: ocb device build (linux/amd64)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-go@v6
+        with:
+          # OCB v0.159.0 requires Go 1.25 or newer.
+          go-version: "1.25"
+          # The barebones scaffold deliberately has no Go dependencies or
+          # go.sum yet, so there is nothing meaningful for setup-go to cache.
+          cache: false
+
+      - name: install ocb
+        run: go install go.opentelemetry.io/collector/cmd/builder@v0.159.0
+
+      - name: build otelcol-canopen
+        run: |
+          export PATH="$(go env GOPATH)/bin:$PATH"
+          builder --config=builder-config.yaml
+
+      - name: verify otlp receiver/exporter are included
+        run: |
+          ./dist/otelcol-canopen components | grep -i otlp

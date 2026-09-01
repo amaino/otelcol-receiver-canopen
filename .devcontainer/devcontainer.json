@@ -1,0 +1,21 @@
+{
+  "name": "otelcol-receiver-canopen",
+  "build": {
+    "dockerfile": "Dockerfile"
+  },
+  // vcan setup requires creating a network interface, which needs
+  // NET_ADMIN (and the vcan kernel module loaded on the Docker host). We
+  // request the capability explicitly instead of full --privileged.
+  "capAdd": ["NET_ADMIN"],
+  "runArgs": ["--cap-add=NET_ADMIN"],
+  "postCreateCommand": "bash .devcontainer/setup-vcan.sh vcan0",
+  "customizations": {
+    "vscode": {
+      "extensions": ["golang.go"],
+      "settings": {
+        "go.toolsManagement.autoUpdate": true
+      }
+    }
+  },
+  "remoteUser": "vscode"
+}

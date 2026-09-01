@@ -24,6 +24,9 @@ profile.cov
 go.work
 go.work.sum
 
+# OpenTelemetry Collector Builder (ocb) output
+/dist/
+
 # env file
 .env
 
