@@ -5,6 +5,30 @@ receivers:
         endpoint: 0.0.0.0:4317
       http:
         endpoint: 0.0.0.0:4318
+  canopen:
+    interface: vcan0
+    sniff:
+      enabled: true
+      heartbeat:
+        emit: logs
+      emcy:
+        emit: both
+      sdo:
+        emit: both
+        filters:
+          - node_id: 1
+            index: 0x2001
+            sub_index: 0x00
+      pdos:
+        - name: motor_tpdo1
+          cob_id: 0x181
+          signals:
+            - name: canopen.motor.speed
+              bit_offset: 0
+              type: int16
+              scale: 0.1
+              unit: rpm
+              emit: metrics
 
 processors:
   memory_limiter:
@@ -30,10 +54,10 @@ service:
   extensions: [zpages]
   pipelines:
     metrics:
-      receivers: [otlp]
+      receivers: [otlp, canopen]
       processors: [memory_limiter, batch]
       exporters: [debug, otlp]
     logs:
-      receivers: [otlp]
+      receivers: [otlp, canopen]
       processors: [memory_limiter, batch]
       exporters: [debug, otlp]
