@@ -1,0 +1,32 @@
+interface: can0
+read_timeout: 1s
+metrics:
+  enabled: true
+  flush_interval: 10s
+logs:
+  enabled: true
+sniff:
+  enabled: true
+  heartbeat:
+    emit: logs
+  emcy:
+    emit: both
+  sdo:
+    emit: both
+    filters:
+      - node_id: 1
+        index: 0x2001
+        sub_index: 0x00
+  pdos:
+    - name: motor_tpdo1
+      cob_id: 0x181
+      signals:
+        - name: canopen.motor.speed
+          bit_offset: 0
+          type: int16
+          scale: 0.1
+          unit: rpm
+          emit: metrics
+          metric_type: gauge
+          attributes:
+            axis: x

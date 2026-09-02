@@ -10,19 +10,83 @@ permissions:
   contents: read
 
 jobs:
-  ocb-build:
-    name: ocb device build (linux/amd64)
+  test:
+    name: build & test
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        module: [".", "receiver/canopenreceiver"]
     steps:
       - uses: actions/checkout@v5
 
       - uses: actions/setup-go@v6
         with:
-          # OCB v0.159.0 requires Go 1.25 or newer.
+          # OCB v0.159.0 and the receiver module require Go 1.25 or newer.
           go-version: "1.25"
-          # The barebones scaffold deliberately has no Go dependencies or
-          # go.sum yet, so there is nothing meaningful for setup-go to cache.
-          cache: false
+          cache-dependency-path: ${{ matrix.module }}/go.sum
+
+      - name: go build
+        working-directory: ${{ matrix.module }}
+        run: go build ./...
+
+      - name: go vet
+        working-directory: ${{ matrix.module }}
+        run: go vet ./...
+
+      - name: go test
+        working-directory: ${{ matrix.module }}
+        run: go test ./... -race -count=1
+
+      - name: gofmt check
+        working-directory: ${{ matrix.module }}
+        shell: bash
+        run: |
+          fmt_out="$(gofmt -l .)"
+          if [ -n "$fmt_out" ]; then
+            echo "The following files are not gofmt-formatted:"
+            echo "$fmt_out"
+            exit 1
+          fi
+
+  cross-compile:
+    name: cross-compile passive receiver
+    runs-on: ubuntu-latest
+    needs: test
+    strategy:
+      matrix:
+        goarch: [amd64, arm64]
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version: "1.25"
+          cache-dependency-path: receiver/canopenreceiver/go.sum
+
+      - name: cross-compile publisher
+        env:
+          GOOS: linux
+          GOARCH: ${{ matrix.goarch }}
+        run: go build -o /dev/null ./cmd/canopen-publisher
+
+      - name: cross-compile receiver package
+        env:
+          GOOS: linux
+          GOARCH: ${{ matrix.goarch }}
+        working-directory: receiver/canopenreceiver
+        run: go build ./...
+
+  ocb-build:
+    name: ocb device build (linux/amd64)
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version: "1.25"
+          cache-dependency-path: go.sum
 
       - name: install ocb
         run: go install go.opentelemetry.io/collector/cmd/builder@v0.159.0
@@ -32,6 +96,6 @@ jobs:
           export PATH="$(go env GOPATH)/bin:$PATH"
           builder --config=builder-config.yaml
 
-      - name: verify otlp receiver/exporter are included
+      - name: verify canopen receiver is included
         run: |
-          ./dist/otelcol-canopen components | grep -i otlp
+          ./dist/otelcol-canopen components | grep -i canopen
