@@ -323,3 +323,80 @@ func TestSniffer_RawCapture_UnmatchedCobIDNotCaptured(t *testing.T) {
 	assert.True(t, metrics.Empty())
 	assert.True(t, logs.Empty())
 }
+
+// TestSniffer_RawMessage_DecodesDeclaredSignals verifies that a raw message
+// definition (e.g. modeling TRUCKCOM's 0x8008 tcReadFWPartNo: command word
+// echo at bytes 0-1, then a little-endian uint32 part number at bytes 2-5
+// and a little-endian uint16 extension at bytes 6-7) decodes into named
+// signals without any bespoke processor.
+func TestSniffer_RawMessage_DecodesDeclaredSignals(t *testing.T) {
+	s := New(Config{
+		InterfaceName: "can0",
+		RawEmitMetric: true,
+		RawEmitLog:    true,
+		RawCobIDs:     map[uint32]struct{}{0x50E: {}},
+		RawMessages: map[uint32][]RawMessageDef{
+			0x50E: {
+				{
+					Name:  "truckcom.read_fw_part_no",
+					Match: []RawMatch{{ByteOffset: 0, Value: 0x08}, {ByteOffset: 1, Value: 0x80}},
+					Signals: []PDOSignal{
+						{Name: "truckcom.fw_part_no", BitOffset: 16, Type: codec.Uint32, EmitMetric: true},
+						{Name: "truckcom.fw_extension", BitOffset: 48, Type: codec.Uint16, EmitLog: true},
+					},
+				},
+			},
+		},
+	})
+	metrics := emit.NewMetricsBuilder()
+	logs := emit.NewLogsBuilder()
+
+	// part no = 7715102 (0x75B91E), extension = 3.
+	s.HandleFrame(cantransport.Frame{ID: 0x50E, Data: []byte{0x08, 0x80, 0x1E, 0xB9, 0x75, 0x00, 0x03, 0x00}}, metrics, logs)
+
+	require.False(t, metrics.Empty())
+	require.False(t, logs.Empty())
+
+	md := metrics.Emit()
+	metric := md.ResourceMetrics().At(0).ScopeMetrics().At(0).Metrics().At(0)
+	assert.Equal(t, "truckcom.fw_part_no", metric.Name())
+	assert.Equal(t, float64(7715102), metric.Gauge().DataPoints().At(0).DoubleValue())
+
+	ld := logs.Emit()
+	records := ld.ResourceLogs().At(0).ScopeLogs().At(0).LogRecords()
+	require.Equal(t, 1, records.Len())
+	assert.Equal(t, "truckcom.fw_extension", records.At(0).Attributes().AsRaw()["canopen.signal.name"])
+	assert.Equal(t, float64(3), records.At(0).Attributes().AsRaw()["canopen.signal.value"])
+}
+
+// TestSniffer_RawMessage_NoMatchFallsBackToRawHex verifies that when a
+// frame's CobID has declared messages but none of their Match conditions
+// are satisfied, the frame still falls back to raw hex capture rather than
+// being dropped.
+func TestSniffer_RawMessage_NoMatchFallsBackToRawHex(t *testing.T) {
+	s := New(Config{
+		InterfaceName: "can0",
+		RawEmitMetric: true,
+		RawEmitLog:    true,
+		RawCobIDs:     map[uint32]struct{}{0x50E: {}},
+		RawMessages: map[uint32][]RawMessageDef{
+			0x50E: {
+				{
+					Name:    "truckcom.read_fw_part_no",
+					Match:   []RawMatch{{ByteOffset: 0, Value: 0x08}, {ByteOffset: 1, Value: 0x80}},
+					Signals: []PDOSignal{{Name: "truckcom.fw_part_no", BitOffset: 16, Type: codec.Uint32, EmitMetric: true}},
+				},
+			},
+		},
+	})
+	metrics := emit.NewMetricsBuilder()
+	logs := emit.NewLogsBuilder()
+
+	// Different command word (0x8046 tcCheckCrc) doesn't match the declared message.
+	s.HandleFrame(cantransport.Frame{ID: 0x50E, Data: []byte{0x46, 0x80, 1, 0, 0, 0, 0, 0}}, metrics, logs)
+
+	require.False(t, metrics.Empty())
+	md := metrics.Emit()
+	metric := md.ResourceMetrics().At(0).ScopeMetrics().At(0).Metrics().At(0)
+	assert.Equal(t, "canopen.raw.frames", metric.Name())
+}

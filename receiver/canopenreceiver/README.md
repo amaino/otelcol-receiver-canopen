@@ -125,6 +125,17 @@ reassembles expedited and segmented upload/download transfers before applying
 these filters and emitting telemetry.
 | `sniff.raw.metrics` / `.logs` | bool | Passively capture frames on `sniff.raw.cob_ids[]` with no protocol decoding. Emits one `canopen.raw.frames` sum point and/or one log per matched frame, carrying the raw hex payload. |
 | `sniff.raw.cob_ids[]` | list of int | Exact 11-bit standard COB-IDs to capture raw. Useful for vendor/proprietary traffic (e.g. a service-tool protocol) that isn't standard CANopen SDO/PDO framing; decoding such payloads is expected to happen downstream, outside this receiver. A COB-ID listed here takes raw-capture precedence over any other sniffing feature that would otherwise handle it. |
+| `sniff.raw.messages[]` | list | Optional declarative decoding of fixed-layout vendor frames on a raw COB-ID, so many vendor protocols don't need a separate downstream processor. A COB-ID referenced by any entry here is automatically raw-captured; you don't also need to list it in `sniff.raw.cob_ids[]`. |
+| `sniff.raw.messages[].name` | string | Identifies the message in logs/errors. |
+| `sniff.raw.messages[].cob_id` | int | The CAN arbitration ID this message is sent on. |
+| `sniff.raw.messages[].match[]` | list | Optional byte-equality conditions used to discriminate this message shape from others sharing the same COB-ID (e.g. a vendor command word echoed in the first bytes of the payload). All entries are ANDed. If omitted, the message matches every frame on `cob_id`. |
+| `sniff.raw.messages[].match[].byte_offset` | int (0-7) | Zero-based byte offset into the frame payload to compare. |
+| `sniff.raw.messages[].match[].value` | int (0-255) | Expected byte value at `byte_offset`. |
+| `sniff.raw.messages[].signals[]` | list | Signals to decode from this message's payload when it matches; see [Signal fields](#signal-fields). Decoded signals are emitted under their own configured name/metric-or-log settings, not as `canopen.raw.frames`. |
+
+If a frame's COB-ID has one or more `sniff.raw.messages[]` entries but none of
+their `match[]` conditions are satisfied, the frame falls back to the
+generic raw-hex capture described above (if `sniff.raw.emit` is set).
 | `sniff.pdos[]` | list | User-defined PDOs (or any fixed-COB-ID frame) to decode. |
 | `sniff.pdos[].name` | string | Identifies the PDO in logs/errors. |
 | `sniff.pdos[].cob_id` | int | The CAN arbitration ID this PDO is sent on. |
