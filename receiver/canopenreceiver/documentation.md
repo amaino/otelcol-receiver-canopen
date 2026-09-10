@@ -80,6 +80,25 @@ event is attributable to a specific node.
 - Declaring a message automatically enables raw capture on its `cob_id`;
   it does not need to also appear in `sniff.raw.cob_ids[]`.
 
+#### Caveat: COB-IDs shared between raw capture and real SDO transfers
+
+Some vendor protocols reuse a device's genuine standard SDO COB-IDs
+(`0x580 + node ID` / `0x600 + node ID`) to carry a private, non-CiA-301
+application protocol — for example a service-tool command word echoed in
+bytes 0-1, sometimes itself spanning multiple frames correlated by an
+application-defined sequence number rather than CiA-301's toggle/segment
+bits. `HandleFrame` checks `sniff.raw.cob_ids`/`sniff.raw.messages` *before*
+routing a frame to the SDO observer, so any COB-ID listed there is fully
+diverted to raw handling and never reaches `sniff.sdo`. This is
+intentional and safe, but it means: **enabling raw capture/decoding on a
+COB-ID that is also a real SDO pair disables passive SDO reassembly for
+*all* traffic on that pair**, not just the vendor frames — the receiver
+cannot distinguish a genuine CANopen SDO segment from a vendor multiframe
+sequence sharing the same wire. If you need both, only declare
+`sniff.raw` for COB-IDs that are exclusively used by the vendor protocol;
+where a COB-ID is genuinely shared, this receiver cannot safely observe
+both protocols on it simultaneously.
+
 ## Logs
 
 ### Heartbeat / NMT state changes
