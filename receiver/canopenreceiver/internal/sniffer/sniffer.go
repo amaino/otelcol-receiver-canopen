@@ -126,6 +126,12 @@ type Config struct {
 	SDOFilters          []SDOFilter
 	SDOObjects          []SDOObjectDef
 	SDOChannels         []SDOChannel
+	// RawEmitMetric/RawEmitLog control emission for frames matched by
+	// RawCobIDs. Raw capture performs no protocol decoding: the payload is
+	// emitted as hex.
+	RawEmitMetric bool
+	RawEmitLog    bool
+	RawCobIDs     map[uint32]struct{}
 }
 
 // Sniffer classifies and decodes frames according to Config, appending
@@ -171,6 +177,11 @@ func (s *Sniffer) HandleFrame(f cantransport.Frame, metrics *emit.MetricsBuilder
 		return
 	}
 
+	if _, ok := s.cfg.RawCobIDs[f.ID]; ok {
+		s.handleRaw(f, metrics, logs)
+		return
+	}
+
 	if pdo, ok := s.cfg.PDOs[f.ID]; ok {
 		s.handlePDO(pdo, f, metrics, logs)
 		return
@@ -210,6 +221,38 @@ func (s *Sniffer) HandleFrame(f cantransport.Frame, metrics *emit.MetricsBuilder
 
 func (s *Sniffer) resourceAttrs() map[string]string {
 	return map[string]string{"canopen.interface": s.cfg.InterfaceName}
+}
+
+// handleRaw emits a matched frame verbatim as hex, without any protocol
+// decoding. Used to capture vendor/proprietary traffic (e.g. non-CANopen
+// service-tool protocols riding on the bus) for later, separate decoding.
+func (s *Sniffer) handleRaw(f cantransport.Frame, metrics *emit.MetricsBuilder, logs *emit.LogsBuilder) {
+	attrs := s.resourceAttrs()
+	attrs["canopen.cob_id"] = fmt.Sprintf("0x%03X", f.ID)
+	eventAttrs := map[string]string{
+		"canopen.raw.data": fmt.Sprintf("%X", f.Data),
+	}
+	logAttrs := map[string]any{
+		"canopen.cob_id":   fmt.Sprintf("0x%03X", f.ID),
+		"canopen.raw.data": fmt.Sprintf("%X", f.Data),
+	}
+	if s.cfg.RawEmitMetric && metrics != nil {
+		metrics.Add(emit.MetricPoint{
+			ResourceAttrs: attrs,
+			Name:          "canopen.raw.frames",
+			Kind:          emit.KindSum,
+			Value:         1,
+			Attributes:    eventAttrs,
+		})
+	}
+	if s.cfg.RawEmitLog && logs != nil {
+		logs.Add(emit.LogRecord{
+			ResourceAttrs: attrs,
+			Severity:      plog.SeverityNumberInfo,
+			Body:          fmt.Sprintf("canopen raw frame on 0x%03X: %X", f.ID, f.Data),
+			Attributes:    logAttrs,
+		})
+	}
 }
 
 func (s *Sniffer) handlePDO(pdo PDODef, f cantransport.Frame, metrics *emit.MetricsBuilder, logs *emit.LogsBuilder) {

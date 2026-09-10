@@ -248,6 +248,38 @@ func (s *SDOSniffConfig) validate() error {
 	return nil
 }
 
+// RawFrameConfig configures passive capture of arbitrary CAN frames that are
+// not decoded by any other sniffing feature. It performs no protocol
+// interpretation: matching frames are emitted as their raw hex payload. This
+// is intended for vendor/proprietary traffic riding on the bus (e.g.
+// diagnostic or service-tool protocols) that a downstream/internal component
+// can decode separately, without teaching this receiver vendor-specific
+// semantics.
+type RawFrameConfig struct {
+	Metrics bool `mapstructure:"metrics"`
+	Logs    bool `mapstructure:"logs"`
+	// CobIDs lists the exact 11-bit standard COB-IDs to capture as raw
+	// frames. Frames on IDs already handled by another sniffing feature
+	// (a configured PDO, heartbeat, EMCY, or standard SDO) are not
+	// affected by this list unless explicitly included here, in which
+	// case the raw capture takes precedence for that COB-ID.
+	CobIDs []uint32 `mapstructure:"cob_ids"`
+}
+
+func (r *RawFrameConfig) validate() error {
+	seen := make(map[uint32]struct{}, len(r.CobIDs))
+	for _, id := range r.CobIDs {
+		if id > 0x7FF {
+			return fmt.Errorf("sniff.raw.cob_ids: 0x%X out of range for an 11-bit standard COB-ID", id)
+		}
+		if _, dup := seen[id]; dup {
+			return fmt.Errorf("sniff.raw.cob_ids: duplicate cob_id 0x%X", id)
+		}
+		seen[id] = struct{}{}
+	}
+	return nil
+}
+
 // SniffConfig configures passive traffic sniffing.
 type SniffConfig struct {
 	Enabled   bool              `mapstructure:"enabled"`
@@ -257,6 +289,9 @@ type SniffConfig struct {
 	// initiate transfers; active polling is a separate future capability.
 	SDO  SDOSniffConfig `mapstructure:"sdo"`
 	PDOs []PDOConfig    `mapstructure:"pdos"`
+	// Raw captures arbitrary CAN IDs as undecoded hex payload; see
+	// RawFrameConfig.
+	Raw RawFrameConfig `mapstructure:"raw"`
 }
 
 func (s *SniffConfig) validate() error {
@@ -270,6 +305,9 @@ func (s *SniffConfig) validate() error {
 		return err
 	}
 	if err := s.SDO.validate(); err != nil {
+		return err
+	}
+	if err := s.Raw.validate(); err != nil {
 		return err
 	}
 	seen := make(map[string]struct{}, len(s.PDOs))
@@ -371,6 +409,9 @@ func (cfg *Config) Validate() error {
 		return err
 	}
 	if err := checkOutputs("sniff.sdo.raw", cfg.Sniff.SDO.Raw.Metrics, cfg.Sniff.SDO.Raw.Logs); err != nil {
+		return err
+	}
+	if err := checkOutputs("sniff.raw", cfg.Sniff.Raw.Metrics, cfg.Sniff.Raw.Logs); err != nil {
 		return err
 	}
 	for _, pdo := range cfg.Sniff.PDOs {

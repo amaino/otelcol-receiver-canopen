@@ -68,6 +68,9 @@ func buildSnifferConfig(cfg *Config) sniffer.Config {
 		SDOFilters:          make([]sniffer.SDOFilter, 0, len(cfg.Sniff.SDO.Raw.Filters)),
 		SDOObjects:          make([]sniffer.SDOObjectDef, 0, len(cfg.Sniff.SDO.Objects)),
 		SDOChannels:         make([]sniffer.SDOChannel, 0, len(cfg.Sniff.SDO.Channels)),
+		RawEmitMetric:       cfg.Sniff.Raw.Metrics,
+		RawEmitLog:          cfg.Sniff.Raw.Logs,
+		RawCobIDs:           make(map[uint32]struct{}, len(cfg.Sniff.Raw.CobIDs)),
 	}
 	if !cfg.Sniff.Enabled {
 		return sc
@@ -93,6 +96,9 @@ func buildSnifferConfig(cfg *Config) sniffer.Config {
 			EmitMetric: object.Metrics, EmitLog: object.Logs,
 			MetricSum: object.MetricType == MetricSum, Attributes: object.Attributes,
 		})
+	}
+	for _, id := range cfg.Sniff.Raw.CobIDs {
+		sc.RawCobIDs[id] = struct{}{}
 	}
 	for _, pdo := range cfg.Sniff.PDOs {
 		def := sniffer.PDODef{Name: pdo.Name, CobID: pdo.CobID}

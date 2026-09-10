@@ -1,6 +1,7 @@
 package sniffer
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -257,6 +258,46 @@ func TestSniffer_UnknownCobID_Ignored(t *testing.T) {
 	metrics := emit.NewMetricsBuilder()
 	logs := emit.NewLogsBuilder()
 	s.HandleFrame(cantransport.Frame{ID: 0x999, Data: []byte{1, 2, 3}}, metrics, logs)
+	assert.True(t, metrics.Empty())
+	assert.True(t, logs.Empty())
+}
+
+func TestSniffer_RawCapture(t *testing.T) {
+	s := New(Config{
+		InterfaceName: "can0",
+		RawEmitMetric: true,
+		RawEmitLog:    true,
+		RawCobIDs:     map[uint32]struct{}{0x50E: {}},
+	})
+	metrics := emit.NewMetricsBuilder()
+	logs := emit.NewLogsBuilder()
+
+	s.HandleFrame(cantransport.Frame{ID: 0x50E, Data: []byte{0x08, 0x80, 1, 2, 3, 4, 5, 6}}, metrics, logs)
+
+	require.False(t, metrics.Empty())
+	require.False(t, logs.Empty())
+	md := metrics.Emit()
+	metric := md.ResourceMetrics().At(0).ScopeMetrics().At(0).Metrics().At(0)
+	assert.Equal(t, "canopen.raw.frames", metric.Name())
+
+	ld := logs.Emit()
+	records := ld.ResourceLogs().At(0).ScopeLogs().At(0).LogRecords()
+	require.Equal(t, 1, records.Len())
+	assert.Equal(t, "0880010203040506", strings.ToLower(records.At(0).Attributes().AsRaw()["canopen.raw.data"].(string)))
+}
+
+func TestSniffer_RawCapture_UnmatchedCobIDNotCaptured(t *testing.T) {
+	s := New(Config{
+		InterfaceName: "can0",
+		RawEmitMetric: true,
+		RawEmitLog:    true,
+		RawCobIDs:     map[uint32]struct{}{0x50E: {}},
+	})
+	metrics := emit.NewMetricsBuilder()
+	logs := emit.NewLogsBuilder()
+
+	s.HandleFrame(cantransport.Frame{ID: 0x999, Data: []byte{1, 2, 3}}, metrics, logs)
+
 	assert.True(t, metrics.Empty())
 	assert.True(t, logs.Empty())
 }

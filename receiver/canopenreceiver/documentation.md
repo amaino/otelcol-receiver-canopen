@@ -48,6 +48,18 @@ event is attributable to a specific node.
   sub-index. The specified fields within one filter are combined with AND;
   multiple filter entries are alternatives, combined with OR.
 
+### `canopen.raw.frames`
+
+- **Type**: non-monotonic cumulative sum; one point with value `1` per
+  captured raw frame.
+- **Enabled by**: `sniff.raw.metrics: true`, for a COB-ID listed in
+  `sniff.raw.cob_ids`.
+- **Attributes (resource)**: `canopen.interface`, `canopen.cob_id`.
+- **Attributes (point)**: `canopen.raw.data` (uppercase hexadecimal payload).
+- No protocol decoding is performed. This exists to capture non-CANopen or
+  vendor-proprietary traffic sharing the bus (e.g. a service-tool protocol)
+  so it can be decoded by a separate, downstream component.
+
 ## Logs
 
 ### Heartbeat / NMT state changes
@@ -92,6 +104,15 @@ For example, an object definition for `0x20F0:11` can turn the raw payload
 into a firmware-version metric or log value. SDO filters select which
 transfers are observed; typed object definitions provide the datatype and
 output name for matching objects.
+
+### Raw frame capture
+
+- **Enabled by**: `sniff.raw.metrics` / `sniff.raw.logs`, for a COB-ID listed
+  in `sniff.raw.cob_ids`.
+- **Emitted**: once per matched frame, with no protocol interpretation.
+- **Severity**: Info
+- **Attributes**: `canopen.cob_id` (hex string), `canopen.raw.data`
+  (uppercase hexadecimal payload).
 
 ### User-configured PDO signal logs
 
