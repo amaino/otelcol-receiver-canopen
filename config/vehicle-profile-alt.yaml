@@ -1,0 +1,39 @@
+# Sample alternate vehicle profile: standard CANopen SDO objects known to be
+# read at startup for parameter/configuration/version verification (see
+# tcs_rae_en50742_howto_investigation.md). Only standard CiA-301 SDO
+# exchanges are listed here; the proprietary TRUCKCOM/DHU protocol is out of
+# scope for this receiver.
+# startup for parameter/configuration/version verification (see
+# tcs_rae_en50742_howto_investigation.md). Only standard CiA-301 SDO
+# exchanges are listed here; the proprietary TRUCKCOM/DHU protocol is out of
+# scope for this receiver.
+receivers:
+  canopen:
+    sniff:
+      sdo:
+        emit: logs
+        filters:
+          - node_id: 0x0B # ACT (traction) — EEPROM parameter CRC
+            index: 0x2009
+            sub_index: 0x05
+          - node_id: 0x0A # ACH (hydraulics) — EEPROM parameter CRC
+            index: 0x2009
+            sub_index: 0x05
+          - node_id: 0x07 # EPS ch1 (steering) — configuration CRC
+            index: 0x4100
+            sub_index: 0x08
+          - node_id: 0x06 # SCU (safety control unit) — system version
+            index: 0x2040
+            sub_index: 0x00
+          - node_id: 0x06 # SCU — parameter hash/CRC
+            index: 0x20E0
+            sub_index: 0x01
+          - node_id: 0x26 # IPM (power module) — system version
+            index: 0x2030
+            sub_index: 0x00
+          - node_id: 0x1E # MCU (self) — firmware SW version
+            index: 0x20F0
+            sub_index: 0x11
+          - node_id: 0x1E # MCU (self) — firmware extension version
+            index: 0x20F0
+            sub_index: 0x12

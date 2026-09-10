@@ -1,0 +1,20 @@
+# Sample vehicle profile: standard CANopen SDO objects known to be read at
+# startup for parameter/configuration verification (see
+# lae_sae_en50742_howto_investigation.md). Only standard CiA-301 SDO
+# exchanges are listed here; the proprietary TRUCKCOM/DHU protocol is out of
+# scope for this receiver.
+receivers:
+  canopen:
+    sniff:
+      sdo:
+        emit: logs
+        filters:
+          - node_id: 8 # ACT (traction, InMotion) — EEPROM parameter checksum
+            index: 0x2009
+            sub_index: 0x06
+          - node_id: 7 # EPS (steering, Allied Motion) — main parameter checksum
+            index: 0x3005
+            sub_index: 0x02
+          - node_id: 7 # EPS — progressive steering parameter checksum
+            index: 0x3005
+            sub_index: 0x03

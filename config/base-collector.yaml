@@ -1,0 +1,51 @@
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+  canopen:
+    # can0 on a device, vcan0 in the devcontainer/CI.
+    interface: ${env:CANOPEN_INTERFACE:-can0}
+    read_timeout: 1s
+    metrics:
+      enabled: false
+    logs:
+      enabled: true
+    sniff:
+      enabled: true
+      heartbeat:
+        emit: logs
+      emcy:
+        emit: logs
+      # sdo.filters / pdos are supplied by a profile file such as
+      # vehicle-profile.yaml, merged in via a second --config argument.
+
+processors:
+  memory_limiter:
+    check_interval: 1s
+    limit_mib: 256
+    spike_limit_mib: 64
+  batch:
+    timeout: 5s
+
+exporters:
+  debug:
+    verbosity: detailed
+  otlp:
+    endpoint: ${env:OTLP_EXPORTER_ENDPOINT:-localhost:4317}
+    tls:
+      insecure: true
+
+extensions:
+  zpages:
+    endpoint: 0.0.0.0:55679
+
+service:
+  extensions: [zpages]
+  pipelines:
+    logs:
+      receivers: [otlp, canopen]
+      processors: [memory_limiter, batch]
+      exporters: [debug, otlp]
