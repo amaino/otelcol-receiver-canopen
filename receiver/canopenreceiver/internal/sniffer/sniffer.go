@@ -112,6 +112,30 @@ type SDOChannel struct {
 	ServerToClientCobID uint32
 }
 
+// RawMatch is a byte-equality condition used to discriminate between
+// multiple raw message shapes sharing one COB-ID.
+type RawMatch struct {
+	ByteOffset int
+	Value      uint8
+}
+
+// RawMessageDef declares a decodable field layout for raw frames on a given
+// COB-ID, optionally narrowed by Match conditions (all ANDed).
+type RawMessageDef struct {
+	Name    string
+	Match   []RawMatch
+	Signals []PDOSignal
+}
+
+func (d RawMessageDef) matches(data []byte) bool {
+	for _, m := range d.Match {
+		if m.ByteOffset >= len(data) || data[m.ByteOffset] != m.Value {
+			return false
+		}
+	}
+	return true
+}
+
 // Config is the subset of receiver configuration the Sniffer needs,
 // expressed in terms independent of the top-level config package.
 type Config struct {
@@ -127,11 +151,14 @@ type Config struct {
 	SDOObjects          []SDOObjectDef
 	SDOChannels         []SDOChannel
 	// RawEmitMetric/RawEmitLog control emission for frames matched by
-	// RawCobIDs. Raw capture performs no protocol decoding: the payload is
-	// emitted as hex.
+	// RawCobIDs. When a matching COB-ID has one or more RawMessages
+	// entries whose Match conditions are satisfied, the frame is decoded
+	// into named signals instead of being emitted as an undifferentiated
+	// hex payload.
 	RawEmitMetric bool
 	RawEmitLog    bool
 	RawCobIDs     map[uint32]struct{}
+	RawMessages   map[uint32][]RawMessageDef // keyed by CobID
 }
 
 // Sniffer classifies and decodes frames according to Config, appending
@@ -223,10 +250,20 @@ func (s *Sniffer) resourceAttrs() map[string]string {
 	return map[string]string{"canopen.interface": s.cfg.InterfaceName}
 }
 
-// handleRaw emits a matched frame verbatim as hex, without any protocol
-// decoding. Used to capture vendor/proprietary traffic (e.g. non-CANopen
-// service-tool protocols riding on the bus) for later, separate decoding.
+// handleRaw emits a matched frame. If the CobID has one or more RawMessages
+// whose Match conditions are satisfied by this frame, it is decoded into
+// named signals (reusing the PDO signal codec) exactly like a PDO. Otherwise
+// it falls back to an undifferentiated hex dump, with no protocol decoding.
+// Used to capture vendor/proprietary traffic (e.g. non-CANopen service-tool
+// protocols riding on the bus) for structured emission or, when no field
+// layout is declared, later separate decoding.
 func (s *Sniffer) handleRaw(f cantransport.Frame, metrics *emit.MetricsBuilder, logs *emit.LogsBuilder) {
+	for _, msg := range s.cfg.RawMessages[f.ID] {
+		if msg.matches(f.Data) {
+			s.handleRawMessage(msg, f, metrics, logs)
+			return
+		}
+	}
 	attrs := s.resourceAttrs()
 	attrs["canopen.cob_id"] = fmt.Sprintf("0x%03X", f.ID)
 	eventAttrs := map[string]string{
@@ -252,6 +289,51 @@ func (s *Sniffer) handleRaw(f cantransport.Frame, metrics *emit.MetricsBuilder, 
 			Body:          fmt.Sprintf("canopen raw frame on 0x%03X: %X", f.ID, f.Data),
 			Attributes:    logAttrs,
 		})
+	}
+}
+
+// handleRawMessage decodes a raw frame's declared signals, exactly like
+// handlePDO, so fixed-layout vendor protocols don't need a bespoke
+// processor.
+func (s *Sniffer) handleRawMessage(msg RawMessageDef, f cantransport.Frame, metrics *emit.MetricsBuilder, logs *emit.LogsBuilder) {
+	for _, sig := range msg.Signals {
+		v, err := codec.Decode(f.Data, sig.Type, sig.BitOffset, sig.ByteLen)
+		if err != nil {
+			continue // malformed/short frame for this signal; skip silently
+		}
+		value := codec.ApplyScale(v, sig.Scale, sig.Offset)
+		attrs := s.resourceAttrs()
+		attrs["canopen.cob_id"] = fmt.Sprintf("0x%03X", f.ID)
+		if sig.EmitMetric && metrics != nil {
+			kind := emit.KindGauge
+			if sig.MetricSum {
+				kind = emit.KindSum
+			}
+			metrics.Add(emit.MetricPoint{
+				ResourceAttrs: attrs,
+				Name:          sig.Name,
+				Unit:          sig.Unit,
+				Kind:          kind,
+				Value:         value,
+				Attributes:    sig.Attributes,
+			})
+		}
+		if sig.EmitLog && logs != nil {
+			logAttrs := map[string]any{
+				"canopen.raw.message":  msg.Name,
+				"canopen.signal.name":  sig.Name,
+				"canopen.signal.value": value,
+			}
+			for k, v := range sig.Attributes {
+				logAttrs[k] = v
+			}
+			logs.Add(emit.LogRecord{
+				ResourceAttrs: attrs,
+				Severity:      plog.SeverityNumberInfo,
+				Body:          fmt.Sprintf("canopen raw message %s signal %s = %v", msg.Name, sig.Name, value),
+				Attributes:    logAttrs,
+			})
+		}
 	}
 }
 

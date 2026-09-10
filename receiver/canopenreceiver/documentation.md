@@ -60,6 +60,26 @@ event is attributable to a specific node.
   vendor-proprietary traffic sharing the bus (e.g. a service-tool protocol)
   so it can be decoded by a separate, downstream component.
 
+### Declarative raw message decoding (`sniff.raw.messages[]`)
+
+- For fixed-layout vendor frames, `sniff.raw.messages[]` decodes named
+  signals directly (same signal semantics as `sniff.pdos[].signals[]`:
+  type, bit offset, scale/offset, unit, `emit`, `metric_type`,
+  `attributes`) instead of emitting opaque raw hex, so a bespoke downstream
+  processor is often unnecessary.
+- Each message may declare `match[]` byte-equality conditions (ANDed) to
+  discriminate its shape from other messages sharing the same COB-ID, such
+  as a vendor command word echoed at the start of the payload. A message
+  with no `match[]` matches every frame on its `cob_id`.
+- Decoded signals are emitted as metrics/logs under their own configured
+  name, following the same emission rules as PDO signals — not as
+  `canopen.raw.frames` / raw hex.
+- If a frame's COB-ID has declared messages but none of them match, the
+  frame falls back to the generic raw-hex capture (`canopen.raw.frames` /
+  raw-frame log) described above, when `sniff.raw.emit` is set.
+- Declaring a message automatically enables raw capture on its `cob_id`;
+  it does not need to also appear in `sniff.raw.cob_ids[]`.
+
 ## Logs
 
 ### Heartbeat / NMT state changes
