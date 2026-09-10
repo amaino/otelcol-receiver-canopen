@@ -137,6 +137,14 @@ If a frame's COB-ID has one or more `sniff.raw.messages[]` entries but none of
 their `match[]` conditions are satisfied, the frame falls back to the
 generic raw-hex capture described above (if `sniff.raw.emit` is set).
 
+> **Limitation:** each frame is decoded independently and statelessly —
+> there is no cross-frame reassembly. Vendor commands that spread one
+> logical result across multiple frames (keyed by an app-level sequence
+> byte rather than CiA-301 toggle/segment bits) can each be declared as
+> their own `sniff.raw.messages[]` entry, but they are emitted as
+> separate, uncorrelated signals rather than one merged event. See
+> [documentation.md](./documentation.md) for details.
+
 > **Caveat:** raw capture/decoding takes precedence over `sniff.sdo`. If a
 > vendor protocol reuses a device's real SDO COB-IDs (`0x580/0x600 + node
 > ID`) — as some multiframe service-tool protocols do — declaring that

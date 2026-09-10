@@ -80,6 +80,31 @@ event is attributable to a specific node.
 - Declaring a message automatically enables raw capture on its `cob_id`;
   it does not need to also appear in `sniff.raw.cob_ids[]`.
 
+#### Limitation: no cross-frame reassembly for vendor multi-sequence commands
+
+`sniff.raw.messages[]` decodes each frame **independently and statelessly**
+— nothing is buffered or correlated across frames. This is sufficient for
+vendor commands that fit in a single 8-byte frame (e.g. TRUCKCOM's
+`0x8008`, `0x80FA`, `0x8037`, `0x8046`), but **not** for commands like
+DHU/TRUCKCOM's `0x800E` (`tcReadPartNo`), which spread one logical result
+across up to 8 separate frames distinguished only by an application-level
+sequence byte (`Data[2]`), with no CiA-301 toggle/last-segment framing to
+key off of.
+
+You can still declare one `sniff.raw.messages[]` entry per sequence number
+(matching `byte_offset`/`value` on the sequence byte) to decode each
+sequence's fields as independent signals — e.g. sequence 3 yields the
+firmware part number, sequence 4 yields its extension — but these are
+emitted as **separate, uncorrelated** telemetry points, not merged into
+one combined event. Reconstructing a single logical record from multiple
+vendor sequences would require stateful, protocol-specific reassembly
+(tracking partial sequences per node/COB-ID, deciding when a set is
+"complete", handling out-of-order or missing sequences) that intentionally
+does not belong in this generic, protocol-agnostic mechanism. If you need
+that, implement it in a separate downstream component (e.g. a processor
+that correlates the independently-emitted per-sequence signals), keeping
+this receiver's raw-message decoding purely declarative and stateless.
+
 #### Caveat: COB-IDs shared between raw capture and real SDO transfers
 
 Some vendor protocols reuse a device's genuine standard SDO COB-IDs
