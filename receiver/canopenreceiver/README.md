@@ -136,6 +136,16 @@ these filters and emitting telemetry.
 If a frame's COB-ID has one or more `sniff.raw.messages[]` entries but none of
 their `match[]` conditions are satisfied, the frame falls back to the
 generic raw-hex capture described above (if `sniff.raw.emit` is set).
+
+> **Caveat:** raw capture/decoding takes precedence over `sniff.sdo`. If a
+> vendor protocol reuses a device's real SDO COB-IDs (`0x580/0x600 + node
+> ID`) — as some multiframe service-tool protocols do — declaring that
+> COB-ID under `sniff.raw` disables passive SDO reassembly for *all*
+> traffic on that pair, not just the vendor frames, since the receiver
+> cannot distinguish a genuine CANopen SDO segment from a vendor
+> application-level sequence sharing the same wire. See
+> [documentation.md](./documentation.md) for details.
+
 | `sniff.pdos[]` | list | User-defined PDOs (or any fixed-COB-ID frame) to decode. |
 | `sniff.pdos[].name` | string | Identifies the PDO in logs/errors. |
 | `sniff.pdos[].cob_id` | int | The CAN arbitration ID this PDO is sent on. |
