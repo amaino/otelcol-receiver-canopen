@@ -71,6 +71,11 @@ receivers:
               metric_type: gauge
               attributes:
                 axis: x
+      raw:
+        metrics: true
+        logs: true
+        cob_ids:
+          - 0x50E
 ```
 
 ## Configuration reference
@@ -118,6 +123,8 @@ filters are ORed. For example, `{node_id: 1, index: 0x2001, sub_index: 0}` selec
 only that object on node 1. The receiver correlates standard SDO frames and
 reassembles expedited and segmented upload/download transfers before applying
 these filters and emitting telemetry.
+| `sniff.raw.metrics` / `.logs` | bool | Passively capture frames on `sniff.raw.cob_ids[]` with no protocol decoding. Emits one `canopen.raw.frames` sum point and/or one log per matched frame, carrying the raw hex payload. |
+| `sniff.raw.cob_ids[]` | list of int | Exact 11-bit standard COB-IDs to capture raw. Useful for vendor/proprietary traffic (e.g. a service-tool protocol) that isn't standard CANopen SDO/PDO framing; decoding such payloads is expected to happen downstream, outside this receiver. A COB-ID listed here takes raw-capture precedence over any other sniffing feature that would otherwise handle it. |
 | `sniff.pdos[]` | list | User-defined PDOs (or any fixed-COB-ID frame) to decode. |
 | `sniff.pdos[].name` | string | Identifies the PDO in logs/errors. |
 | `sniff.pdos[].cob_id` | int | The CAN arbitration ID this PDO is sent on. |

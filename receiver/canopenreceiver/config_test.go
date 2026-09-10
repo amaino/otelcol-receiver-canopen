@@ -186,3 +186,30 @@ func TestConfig_Validate_SDOObjectRequiresMetricsEnabled(t *testing.T) {
 	}}
 	require.Error(t, cfg.Validate())
 }
+
+func TestConfig_Validate_RawEmitRequiresLogsEnabled(t *testing.T) {
+	cfg := validBaseConfig()
+	cfg.Logs.Enabled = false
+	cfg.Sniff.Raw.Logs = true
+	require.Error(t, cfg.Validate())
+}
+
+func TestConfig_Validate_RawCobIDOutOfRange(t *testing.T) {
+	cfg := validBaseConfig()
+	cfg.Sniff.Raw.CobIDs = []uint32{0x800}
+	require.Error(t, cfg.Validate())
+}
+
+func TestConfig_Validate_RawCobIDDuplicate(t *testing.T) {
+	cfg := validBaseConfig()
+	cfg.Sniff.Raw.CobIDs = []uint32{0x50E, 0x50E}
+	require.Error(t, cfg.Validate())
+}
+
+func TestConfig_Validate_RawCobIDOK(t *testing.T) {
+	cfg := validBaseConfig()
+	cfg.Sniff.Raw.Metrics = true
+	cfg.Sniff.Raw.Logs = true
+	cfg.Sniff.Raw.CobIDs = []uint32{0x50E, 0x48E}
+	require.NoError(t, cfg.Validate())
+}
