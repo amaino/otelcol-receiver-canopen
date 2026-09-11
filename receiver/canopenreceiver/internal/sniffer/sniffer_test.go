@@ -107,6 +107,73 @@ func TestSniffer_SDORequestAndAbort(t *testing.T) {
 	assert.Equal(t, "0x06020000", records.At(0).Attributes().AsRaw()["canopen.sdo.abort_code"])
 }
 
+func TestSniffer_SDOChannelsSameNode(t *testing.T) {
+	s := New(Config{
+		InterfaceName: "can0",
+		SDOEmitLog:    true,
+		SDOChannels: []SDOChannel{
+			{NodeID: 1, ClientToServerCobID: 0x601, ServerToClientCobID: 0x581},
+			{NodeID: 1, ClientToServerCobID: 0x611, ServerToClientCobID: 0x591},
+		},
+	})
+	logs := emit.NewLogsBuilder()
+
+	s.HandleFrame(cantransport.Frame{ID: 0x601, Data: []byte{0x40, 0x01, 0x20, 0x00}}, nil, logs)
+	s.HandleFrame(cantransport.Frame{ID: 0x611, Data: []byte{0x40, 0x02, 0x20, 0x00}}, nil, logs)
+	s.HandleFrame(cantransport.Frame{ID: 0x581, Data: []byte{0x43, 0x01, 0x20, 0x00, 1, 0, 0, 0}}, nil, logs)
+	s.HandleFrame(cantransport.Frame{ID: 0x591, Data: []byte{0x43, 0x02, 0x20, 0x00, 2, 0, 0, 0}}, nil, logs)
+
+	records := logs.Emit().ResourceLogs().At(0).ScopeLogs().At(0).LogRecords()
+	require.Equal(t, 2, records.Len())
+}
+
+func TestSniffer_SDOUsesDefaultChannelsWhenUnconfigured(t *testing.T) {
+	s := New(Config{InterfaceName: "can0", SDOEmitLog: true})
+	logs := emit.NewLogsBuilder()
+	s.HandleFrame(cantransport.Frame{ID: 0x601, Data: []byte{0x2F, 0x01, 0x20, 0x00, 1, 0, 0, 0}}, nil, logs)
+	require.Equal(t, 1, logs.Emit().ResourceLogs().At(0).ScopeLogs().At(0).LogRecords().Len())
+}
+
+func TestSniffer_TypedSDOObject(t *testing.T) {
+	s := New(Config{
+		InterfaceName: "can0",
+		SDOEmitLog:    true,
+		SDOObjects: []SDOObjectDef{{
+			NodeID: 1, Index: 0x20F0, SubIndex: 0x11,
+			Name: "canopen.mcu.firmware", Type: codec.Uint32, EmitMetric: true,
+		}},
+	})
+	metrics := emit.NewMetricsBuilder()
+	logs := emit.NewLogsBuilder()
+
+	s.HandleFrame(cantransport.Frame{ID: 0x601, Data: []byte{0x40, 0xF0, 0x20, 0x11, 0, 0, 0, 0}}, metrics, logs)
+	s.HandleFrame(cantransport.Frame{ID: 0x581, Data: []byte{0x43, 0xF0, 0x20, 0x11, 0x1E, 0xB9, 0x75, 0x00}}, metrics, logs)
+
+	md := metrics.Emit()
+	require.Equal(t, 1, md.ResourceMetrics().At(0).ScopeMetrics().At(0).Metrics().Len())
+	metric := md.ResourceMetrics().At(0).ScopeMetrics().At(0).Metrics().At(0)
+	assert.Equal(t, "canopen.mcu.firmware", metric.Name())
+	assert.Equal(t, float64(7715102), metric.Gauge().DataPoints().At(0).DoubleValue())
+}
+
+func TestSniffer_TypedSDOObjectDoesNotRequireRawFilter(t *testing.T) {
+	nodeID := uint8(1)
+	s := New(Config{
+		InterfaceName: "can0",
+		SDOFilters:    []SDOFilter{{NodeID: &nodeID, Index: ptrUint16(0x2000)}},
+		SDOObjects: []SDOObjectDef{{
+			NodeID: 1, Index: 0x20F0, SubIndex: 0x11,
+			Name: "canopen.mcu.firmware", Type: codec.Uint32, EmitMetric: true,
+		}},
+	})
+	metrics := emit.NewMetricsBuilder()
+	s.HandleFrame(cantransport.Frame{ID: 0x601, Data: []byte{0x40, 0xF0, 0x20, 0x11, 0, 0, 0, 0}}, metrics, nil)
+	s.HandleFrame(cantransport.Frame{ID: 0x581, Data: []byte{0x43, 0xF0, 0x20, 0x11, 0x1E, 0xB9, 0x75, 0x00}}, metrics, nil)
+	require.Equal(t, 1, metrics.Emit().ResourceMetrics().At(0).ScopeMetrics().At(0).Metrics().Len())
+}
+
+func ptrUint16(v uint16) *uint16 { return &v }
+
 func TestSniffer_SDOReassemblesSegmentedUpload(t *testing.T) {
 	s := New(Config{InterfaceName: "can0", SDOEmitLog: true})
 	logs := emit.NewLogsBuilder()

@@ -34,13 +34,13 @@ func TestReceiver_EndToEnd_SniffPDOAndEMCY(t *testing.T) {
 	cfg.ReadTimeout = 50 * time.Millisecond
 	cfg.Metrics.FlushInterval = 100 * time.Millisecond
 	cfg.Sniff.Enabled = true
-	cfg.Sniff.EMCY.Emit = EmitLogs
+	cfg.Sniff.EMCY.Logs = true
 	cfg.Sniff.PDOs = []PDOConfig{
 		{
 			Name:  "motor_tpdo1",
 			CobID: 0x181,
 			Signals: []SignalConfig{
-				{Name: "canopen.motor.speed", Type: codec.Int16, Scale: 0.1, Emit: EmitMetrics},
+				{Name: "canopen.motor.speed", Type: codec.Int16, Scale: 0.1, Metrics: true},
 			},
 		},
 	}

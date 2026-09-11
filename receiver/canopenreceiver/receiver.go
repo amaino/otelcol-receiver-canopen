@@ -59,22 +59,39 @@ func buildSnifferConfig(cfg *Config) sniffer.Config {
 	sc := sniffer.Config{
 		InterfaceName:       cfg.Interface,
 		PDOs:                make(map[uint32]sniffer.PDODef),
-		HeartbeatEmitMetric: cfg.Sniff.Heartbeat.Emit.emitsMetrics(),
-		HeartbeatEmitLog:    cfg.Sniff.Heartbeat.Emit.emitsLogs(),
-		EMCYEmitMetric:      cfg.Sniff.EMCY.Emit.emitsMetrics(),
-		EMCYEmitLog:         cfg.Sniff.EMCY.Emit.emitsLogs(),
-		SDOEmitMetric:       cfg.Sniff.SDO.Emit.emitsMetrics(),
-		SDOEmitLog:          cfg.Sniff.SDO.Emit.emitsLogs(),
-		SDOFilters:          make([]sniffer.SDOFilter, 0, len(cfg.Sniff.SDO.Filters)),
+		HeartbeatEmitMetric: cfg.Sniff.Heartbeat.Metrics,
+		HeartbeatEmitLog:    cfg.Sniff.Heartbeat.Logs,
+		EMCYEmitMetric:      cfg.Sniff.EMCY.Metrics,
+		EMCYEmitLog:         cfg.Sniff.EMCY.Logs,
+		SDOEmitMetric:       cfg.Sniff.SDO.Raw.Metrics,
+		SDOEmitLog:          cfg.Sniff.SDO.Raw.Logs,
+		SDOFilters:          make([]sniffer.SDOFilter, 0, len(cfg.Sniff.SDO.Raw.Filters)),
+		SDOObjects:          make([]sniffer.SDOObjectDef, 0, len(cfg.Sniff.SDO.Objects)),
+		SDOChannels:         make([]sniffer.SDOChannel, 0, len(cfg.Sniff.SDO.Channels)),
 	}
 	if !cfg.Sniff.Enabled {
 		return sc
 	}
-	for _, filter := range cfg.Sniff.SDO.Filters {
+	for _, filter := range cfg.Sniff.SDO.Raw.Filters {
 		sc.SDOFilters = append(sc.SDOFilters, sniffer.SDOFilter{
 			NodeID:   filter.NodeID,
 			Index:    filter.Index,
 			SubIndex: filter.SubIndex,
+		})
+	}
+	for _, channel := range cfg.Sniff.SDO.Channels {
+		sc.SDOChannels = append(sc.SDOChannels, sniffer.SDOChannel{
+			NodeID: channel.NodeID, ClientToServerCobID: channel.ClientToServerCobID,
+			ServerToClientCobID: channel.ServerToClientCobID,
+		})
+	}
+	for _, object := range cfg.Sniff.SDO.Objects {
+		sc.SDOObjects = append(sc.SDOObjects, sniffer.SDOObjectDef{
+			NodeID: object.NodeID, Index: object.Index, SubIndex: object.SubIndex,
+			Name: object.Name, Type: object.Type, ByteLen: object.ByteLen,
+			Scale: object.Scale, Offset: object.Offset, Unit: object.Unit,
+			EmitMetric: object.Metrics, EmitLog: object.Logs,
+			MetricSum: object.MetricType == MetricSum, Attributes: object.Attributes,
 		})
 	}
 	for _, pdo := range cfg.Sniff.PDOs {
@@ -88,8 +105,8 @@ func buildSnifferConfig(cfg *Config) sniffer.Config {
 				Scale:      sig.Scale,
 				Offset:     sig.Offset,
 				Unit:       sig.Unit,
-				EmitMetric: sig.Emit.emitsMetrics(),
-				EmitLog:    sig.Emit.emitsLogs(),
+				EmitMetric: sig.Metrics,
+				EmitLog:    sig.Logs,
 				MetricSum:  sig.MetricType == MetricSum,
 				Attributes: sig.Attributes,
 			})

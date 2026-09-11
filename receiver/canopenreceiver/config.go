@@ -1,8 +1,9 @@
 // Package canopenreceiver implements an OpenTelemetry Collector receiver for
 // CANopen traffic over Linux SocketCAN. This version supports passive
-// sniffing of PDO/EMCY/heartbeat traffic, fully driven by a declarative
-// configuration of which signals to decode and whether each is emitted as a
-// metric, a log, or both. Active SDO polling is added in a later commit.
+// sniffing of standard SDO (including segmented transfers), PDO/EMCY/heartbeat
+// traffic, and declarative raw frames. Configuration controls which signals
+// are decoded and whether each is emitted as a metric, a log, or both.
+// Active SDO polling is added in a later commit.
 package canopenreceiver
 
 import (
@@ -14,28 +15,6 @@ import (
 
 	"github.com/amaino/otelcol-receiver-canopen/receiver/canopenreceiver/internal/codec"
 )
-
-// EmitMode controls whether a decoded signal is emitted as a metric, a log,
-// or both.
-type EmitMode string
-
-const (
-	EmitMetrics EmitMode = "metrics"
-	EmitLogs    EmitMode = "logs"
-	EmitBoth    EmitMode = "both"
-)
-
-func (m EmitMode) emitsMetrics() bool { return m == EmitMetrics || m == EmitBoth }
-func (m EmitMode) emitsLogs() bool    { return m == EmitLogs || m == EmitBoth }
-
-func (m EmitMode) validate() error {
-	switch m {
-	case EmitMetrics, EmitLogs, EmitBoth:
-		return nil
-	default:
-		return fmt.Errorf("invalid emit mode %q: must be one of metrics, logs, both", m)
-	}
-}
 
 // MetricType selects the OTel metric data point type for a signal emitted as
 // a metric.
@@ -56,7 +35,7 @@ func (t MetricType) validate() error {
 }
 
 // SignalConfig describes how to decode and emit a single value extracted
-// from a CAN frame (currently: PDO payloads).
+// from a CAN frame or completed SDO payload.
 type SignalConfig struct {
 	// Name is the metric name (metric emission) or log record attribute
 	// "canopen.signal.name" value (log emission). Must be unique within its
@@ -83,10 +62,10 @@ type SignalConfig struct {
 	// Unit is an optional UCUM-ish unit string attached to metrics/logs.
 	Unit string `mapstructure:"unit"`
 
-	// Emit selects whether this signal becomes a metric, a log, or both.
-	Emit EmitMode `mapstructure:"emit"`
+	Metrics bool `mapstructure:"metrics"`
+	Logs    bool `mapstructure:"logs"`
 
-	// MetricType selects gauge vs. sum when Emit includes metrics. Defaults
+	// MetricType selects gauge vs. sum when Metrics is enabled. Defaults
 	// to gauge.
 	MetricType MetricType `mapstructure:"metric_type"`
 
@@ -113,9 +92,6 @@ func (s *SignalConfig) validate(scope string) error {
 		if s.BitOffset%8 != 0 {
 			return fmt.Errorf("%s %q: bit_offset must be byte-aligned for type %q", scope, s.Name, s.Type)
 		}
-	}
-	if err := s.Emit.validate(); err != nil {
-		return fmt.Errorf("%s %q: %w", scope, s.Name, err)
 	}
 	if err := s.MetricType.validate(); err != nil {
 		return fmt.Errorf("%s %q: %w", scope, s.Name, err)
@@ -161,21 +137,16 @@ func (p *PDOConfig) validate() error {
 // (heartbeat/NMT state changes and EMCY emergency messages) that doesn't need
 // a user-declared signal table.
 type SimpleEventConfig struct {
-	Emit EmitMode `mapstructure:"emit"`
+	Metrics bool `mapstructure:"metrics"`
+	Logs    bool `mapstructure:"logs"`
 }
 
 func (s *SimpleEventConfig) validate(name string) error {
-	if s.Emit == "" {
-		return nil
-	}
-	if err := s.Emit.validate(); err != nil {
-		return fmt.Errorf("%s: %w", name, err)
-	}
 	return nil
 }
 
-// SDOFilter selects passively observed SDO traffic. Unset fields are
-// wildcards; at least one configured filter must match for a frame to emit.
+// SDOFilter selects passively observed SDO traffic for generic raw emission.
+// Unset fields are wildcards.
 type SDOFilter struct {
 	NodeID   *uint8  `mapstructure:"node_id"`
 	Index    *uint16 `mapstructure:"index"`
@@ -189,22 +160,89 @@ func (f *SDOFilter) validate() error {
 	return nil
 }
 
+// SDOObjectConfig describes the datatype and output mapping for one SDO
+// object. The signal fields use the completed SDO payload as their input.
+type SDOObjectConfig struct {
+	NodeID       uint8  `mapstructure:"node_id"`
+	Index        uint16 `mapstructure:"index"`
+	SubIndex     uint8  `mapstructure:"sub_index"`
+	SignalConfig `mapstructure:",squash"`
+}
+
+func (s *SDOObjectConfig) validate() error {
+	if s.NodeID < 1 || s.NodeID > 127 {
+		return fmt.Errorf("sniff.sdo.objects: node_id %d out of range 1..127", s.NodeID)
+	}
+	if err := s.SignalConfig.validate("sniff.sdo object"); err != nil {
+		return err
+	}
+	return nil
+}
+
 // SDOSniffConfig configures passive observation of SDO frames exchanged by
 // other nodes. It never initiates an SDO transfer.
 type SDOSniffConfig struct {
-	Emit    EmitMode    `mapstructure:"emit"`
+	Channels []SDOChannelConfig `mapstructure:"channels"`
+	Objects  []SDOObjectConfig  `mapstructure:"objects"`
+	Raw      SDORawConfig       `mapstructure:"raw"`
+}
+
+// SDOChannelConfig identifies one standard CANopen SDO client/server COB-ID
+// pair. Multiple channels may use the same node ID.
+type SDOChannelConfig struct {
+	NodeID              uint8  `mapstructure:"node_id"`
+	ClientToServerCobID uint32 `mapstructure:"client_to_server_cob_id"`
+	ServerToClientCobID uint32 `mapstructure:"server_to_client_cob_id"`
+}
+
+func (c *SDOChannelConfig) validate(index int) error {
+	if c.NodeID == 0 || c.NodeID > 127 {
+		return fmt.Errorf("sniff.sdo.channels[%d]: node_id must be in range 1..127", index)
+	}
+	if c.ClientToServerCobID > 0x7FF {
+		return fmt.Errorf("sniff.sdo.channels[%d]: client_to_server_cob_id must be a standard CAN ID in range 0x000..0x7FF", index)
+	}
+	if c.ServerToClientCobID > 0x7FF {
+		return fmt.Errorf("sniff.sdo.channels[%d]: server_to_client_cob_id must be a standard CAN ID in range 0x000..0x7FF", index)
+	}
+	return nil
+}
+
+// SDORawConfig controls optional generic hex emission for completed standard
+// SDO transfers. Typed object definitions are emitted independently.
+type SDORawConfig struct {
+	Metrics bool        `mapstructure:"metrics"`
+	Logs    bool        `mapstructure:"logs"`
 	Filters []SDOFilter `mapstructure:"filters"`
 }
 
 func (s *SDOSniffConfig) validate() error {
-	if s.Emit != "" {
-		if err := s.Emit.validate(); err != nil {
-			return fmt.Errorf("sniff.sdo: %w", err)
+	seen := make(map[uint32]struct{}, len(s.Channels)*2)
+	for i := range s.Channels {
+		if err := s.Channels[i].validate(i); err != nil {
+			return err
+		}
+		for _, cobID := range []uint32{s.Channels[i].ClientToServerCobID, s.Channels[i].ServerToClientCobID} {
+			if _, duplicate := seen[cobID]; duplicate {
+				return fmt.Errorf("sniff.sdo.channels: duplicate cob_id 0x%03X", cobID)
+			}
+			seen[cobID] = struct{}{}
 		}
 	}
-	for i := range s.Filters {
-		if err := s.Filters[i].validate(); err != nil {
-			return fmt.Errorf("sniff.sdo.filters[%d]: %w", i, err)
+	objectSeen := make(map[string]struct{}, len(s.Objects))
+	for i := range s.Objects {
+		if err := s.Objects[i].validate(); err != nil {
+			return fmt.Errorf("sniff.sdo.objects[%d]: %w", i, err)
+		}
+		key := fmt.Sprintf("%d:%04X:%02X", s.Objects[i].NodeID, s.Objects[i].Index, s.Objects[i].SubIndex)
+		if _, duplicate := objectSeen[key]; duplicate {
+			return fmt.Errorf("sniff.sdo.objects: duplicate object %s", key)
+		}
+		objectSeen[key] = struct{}{}
+	}
+	for i := range s.Raw.Filters {
+		if err := s.Raw.Filters[i].validate(); err != nil {
+			return fmt.Errorf("sniff.sdo.raw.filters[%d]: %w", i, err)
 		}
 	}
 	return nil
@@ -316,36 +354,35 @@ func (cfg *Config) Validate() error {
 	// metrics.enabled, and any signal requesting logs emission requires
 	// logs.enabled, so misconfiguration fails fast instead of silently
 	// dropping data.
-	var checkEmit func(scope string, e EmitMode) error
-	checkEmit = func(scope string, e EmitMode) error {
-		if e.emitsMetrics() && !cfg.Metrics.Enabled {
-			return fmt.Errorf("%s: emit %q requires metrics.enabled=true", scope, e)
+	var checkOutputs func(scope string, metrics, logs bool) error
+	checkOutputs = func(scope string, metrics, logs bool) error {
+		if metrics && !cfg.Metrics.Enabled {
+			return fmt.Errorf("%s: metrics output requires metrics.enabled=true", scope)
 		}
-		if e.emitsLogs() && !cfg.Logs.Enabled {
-			return fmt.Errorf("%s: emit %q requires logs.enabled=true", scope, e)
+		if logs && !cfg.Logs.Enabled {
+			return fmt.Errorf("%s: logs output requires logs.enabled=true", scope)
 		}
 		return nil
 	}
-	if cfg.Sniff.Heartbeat.Emit != "" {
-		if err := checkEmit("sniff.heartbeat", cfg.Sniff.Heartbeat.Emit); err != nil {
-			return err
-		}
+	if err := checkOutputs("sniff.heartbeat", cfg.Sniff.Heartbeat.Metrics, cfg.Sniff.Heartbeat.Logs); err != nil {
+		return err
 	}
-	if cfg.Sniff.EMCY.Emit != "" {
-		if err := checkEmit("sniff.emcy", cfg.Sniff.EMCY.Emit); err != nil {
-			return err
-		}
+	if err := checkOutputs("sniff.emcy", cfg.Sniff.EMCY.Metrics, cfg.Sniff.EMCY.Logs); err != nil {
+		return err
 	}
-	if cfg.Sniff.SDO.Emit != "" {
-		if err := checkEmit("sniff.sdo", cfg.Sniff.SDO.Emit); err != nil {
-			return err
-		}
+	if err := checkOutputs("sniff.sdo.raw", cfg.Sniff.SDO.Raw.Metrics, cfg.Sniff.SDO.Raw.Logs); err != nil {
+		return err
 	}
 	for _, pdo := range cfg.Sniff.PDOs {
 		for _, sig := range pdo.Signals {
-			if err := checkEmit(fmt.Sprintf("pdo %q signal %q", pdo.Name, sig.Name), sig.Emit); err != nil {
+			if err := checkOutputs(fmt.Sprintf("pdo %q signal %q", pdo.Name, sig.Name), sig.Metrics, sig.Logs); err != nil {
 				return err
 			}
+		}
+	}
+	for _, object := range cfg.Sniff.SDO.Objects {
+		if err := checkOutputs(fmt.Sprintf("sdo object %q", object.Name), object.Metrics, object.Logs); err != nil {
+			return err
 		}
 	}
 	return nil

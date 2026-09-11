@@ -26,16 +26,25 @@ func TestLoadConfig(t *testing.T) {
 	assert.True(t, cfg.Logs.Enabled)
 
 	require.True(t, cfg.Sniff.Enabled)
-	assert.Equal(t, EmitLogs, cfg.Sniff.Heartbeat.Emit)
-	assert.Equal(t, EmitBoth, cfg.Sniff.EMCY.Emit)
-	assert.Equal(t, EmitBoth, cfg.Sniff.SDO.Emit)
-	require.Len(t, cfg.Sniff.SDO.Filters, 1)
-	require.NotNil(t, cfg.Sniff.SDO.Filters[0].NodeID)
-	assert.EqualValues(t, 1, *cfg.Sniff.SDO.Filters[0].NodeID)
-	require.NotNil(t, cfg.Sniff.SDO.Filters[0].Index)
-	assert.EqualValues(t, 0x2001, *cfg.Sniff.SDO.Filters[0].Index)
-	require.NotNil(t, cfg.Sniff.SDO.Filters[0].SubIndex)
-	assert.EqualValues(t, 0, *cfg.Sniff.SDO.Filters[0].SubIndex)
+	assert.True(t, cfg.Sniff.Heartbeat.Logs)
+	assert.True(t, cfg.Sniff.EMCY.Metrics)
+	assert.True(t, cfg.Sniff.EMCY.Logs)
+	assert.True(t, cfg.Sniff.SDO.Raw.Metrics)
+	assert.True(t, cfg.Sniff.SDO.Raw.Logs)
+	require.Len(t, cfg.Sniff.SDO.Channels, 2)
+	assert.EqualValues(t, 0x611, cfg.Sniff.SDO.Channels[1].ClientToServerCobID)
+	require.Len(t, cfg.Sniff.SDO.Objects, 1)
+	assert.EqualValues(t, 30, cfg.Sniff.SDO.Objects[0].NodeID)
+	assert.EqualValues(t, 0x20F0, cfg.Sniff.SDO.Objects[0].Index)
+	assert.EqualValues(t, 0x11, cfg.Sniff.SDO.Objects[0].SubIndex)
+	assert.Equal(t, codec.Uint32, cfg.Sniff.SDO.Objects[0].Type)
+	require.Len(t, cfg.Sniff.SDO.Raw.Filters, 1)
+	require.NotNil(t, cfg.Sniff.SDO.Raw.Filters[0].NodeID)
+	assert.EqualValues(t, 1, *cfg.Sniff.SDO.Raw.Filters[0].NodeID)
+	require.NotNil(t, cfg.Sniff.SDO.Raw.Filters[0].Index)
+	assert.EqualValues(t, 0x2001, *cfg.Sniff.SDO.Raw.Filters[0].Index)
+	require.NotNil(t, cfg.Sniff.SDO.Raw.Filters[0].SubIndex)
+	assert.EqualValues(t, 0, *cfg.Sniff.SDO.Raw.Filters[0].SubIndex)
 	require.Len(t, cfg.Sniff.PDOs, 1)
 	pdo := cfg.Sniff.PDOs[0]
 	assert.Equal(t, "motor_tpdo1", pdo.Name)
@@ -46,7 +55,7 @@ func TestLoadConfig(t *testing.T) {
 	assert.Equal(t, codec.Int16, sig.Type)
 	assert.Equal(t, 0.1, sig.Scale)
 	assert.Equal(t, "rpm", sig.Unit)
-	assert.Equal(t, EmitMetrics, sig.Emit)
+	assert.True(t, sig.Metrics)
 	assert.Equal(t, "x", sig.Attributes["axis"])
 
 	require.NoError(t, cfg.Validate())
@@ -61,7 +70,7 @@ func validBaseConfig() *Config {
 			Name:  "pdo1",
 			CobID: 0x181,
 			Signals: []SignalConfig{
-				{Name: "sig1", Type: codec.Uint8, Emit: EmitMetrics},
+				{Name: "sig1", Type: codec.Uint8, Metrics: true},
 			},
 		},
 	}
@@ -117,20 +126,62 @@ func TestConfig_Validate_DuplicateCobID(t *testing.T) {
 func TestConfig_Validate_EmitRequiresSignalEnabled(t *testing.T) {
 	cfg := validBaseConfig()
 	cfg.Logs.Enabled = false
-	cfg.Sniff.PDOs[0].Signals[0].Emit = EmitLogs
+	cfg.Sniff.PDOs[0].Signals[0].Logs = true
 	require.Error(t, cfg.Validate())
 }
 
 func TestConfig_Validate_SDOEmitRequiresLogsEnabled(t *testing.T) {
 	cfg := validBaseConfig()
 	cfg.Logs.Enabled = false
-	cfg.Sniff.SDO.Emit = EmitLogs
+	cfg.Sniff.SDO.Raw.Logs = true
 	require.Error(t, cfg.Validate())
+}
+
+func TestConfig_Validate_OutputSelectorsRequireConfiguredSignal(t *testing.T) {
+	cfg := validBaseConfig()
+	cfg.Sniff.PDOs[0].Signals[0].Metrics = false
+	cfg.Sniff.PDOs[0].Signals[0].Logs = false
+	require.NoError(t, cfg.Validate())
 }
 
 func TestConfig_Validate_SDOFilterNodeID(t *testing.T) {
 	cfg := validBaseConfig()
 	nodeID := uint8(128)
-	cfg.Sniff.SDO.Filters = []SDOFilter{{NodeID: &nodeID}}
+	cfg.Sniff.SDO.Raw.Filters = []SDOFilter{{NodeID: &nodeID}}
+	require.Error(t, cfg.Validate())
+}
+
+func TestConfig_Validate_SDOChannels(t *testing.T) {
+	cfg := validBaseConfig()
+	cfg.Sniff.SDO.Channels = []SDOChannelConfig{
+		{NodeID: 1, ClientToServerCobID: 0x601, ServerToClientCobID: 0x581},
+		{NodeID: 1, ClientToServerCobID: 0x611, ServerToClientCobID: 0x591},
+	}
+	require.NoError(t, cfg.Validate())
+}
+
+func TestConfig_Validate_SDOChannelAllowsNonstandardCOBIDs(t *testing.T) {
+	cfg := validBaseConfig()
+	cfg.Sniff.SDO.Channels = []SDOChannelConfig{{
+		NodeID: 1, ClientToServerCobID: 0x501, ServerToClientCobID: 0x581,
+	}}
+	require.NoError(t, cfg.Validate())
+}
+
+func TestConfig_Validate_SDOChannelRejectsExtendedCOBIDs(t *testing.T) {
+	cfg := validBaseConfig()
+	cfg.Sniff.SDO.Channels = []SDOChannelConfig{{
+		NodeID: 1, ClientToServerCobID: 0x800, ServerToClientCobID: 0x581,
+	}}
+	require.Error(t, cfg.Validate())
+}
+
+func TestConfig_Validate_SDOObjectRequiresMetricsEnabled(t *testing.T) {
+	cfg := validBaseConfig()
+	cfg.Metrics.Enabled = false
+	cfg.Sniff.SDO.Objects = []SDOObjectConfig{{
+		NodeID: 1, Index: 0x20F0, SubIndex: 0x11,
+		SignalConfig: SignalConfig{Name: "firmware", Type: codec.Uint32, Metrics: true},
+	}}
 	require.Error(t, cfg.Validate())
 }

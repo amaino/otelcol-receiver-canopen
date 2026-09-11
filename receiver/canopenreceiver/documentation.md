@@ -13,7 +13,7 @@ event is attributable to a specific node.
 ### `canopen.node.nmt_state`
 
 - **Type**: gauge (unitless integer NMT state code)
-- **Enabled by**: `sniff.heartbeat.emit: metrics` or `both`
+- **Enabled by**: `sniff.heartbeat.metrics: true`
 - **Attributes (resource)**: `canopen.interface`, `canopen.node_id`
 - **Value**: raw NMT state byte from the heartbeat frame (`0x00` bootup,
   `0x04` stopped, `0x05` operational, `0x7F` pre-operational).
@@ -22,7 +22,7 @@ event is attributable to a specific node.
 ### `canopen.node.emcy_error_register`
 
 - **Type**: gauge (unitless)
-- **Enabled by**: `sniff.emcy.emit: metrics` or `both`
+- **Enabled by**: `sniff.emcy.metrics: true`
 - **Attributes (resource)**: `canopen.interface`, `canopen.node_id`
 - **Value**: the CiA 301 error register byte from the EMCY frame.
 - Emitted on every EMCY frame.
@@ -31,7 +31,7 @@ event is attributable to a specific node.
 
 - **Type**: non-monotonic cumulative sum; one point with value `1` per
   passively observed completed SDO transfer or abort.
-- **Enabled by**: `sniff.sdo.emit: metrics` or `both`
+- **Enabled by**: `sniff.sdo.raw.metrics: true`
 - **Attributes (resource)**: `canopen.interface`, `canopen.node_id`
 - **Attributes (point)**: `canopen.sdo.direction`
   (`client_to_server` or `server_to_client`), `canopen.sdo.command`, and,
@@ -40,7 +40,11 @@ event is attributable to a specific node.
   `canopen.sdo.abort_code`.
 - Supports expedited and segmented upload/download transfers. The receiver is
   only an observer: it does not send or respond to SDO frames.
-- `sniff.sdo.filters` can restrict emission by node ID, object index, and
+- Multiple SDO channels can be configured on the same CAN interface. Each
+  channel specifies its node ID and client/server COB-ID pair. Configured
+  COB-IDs may use nonstandard assignments; they are only required to be valid
+  standard 11-bit CAN IDs and unique across the configured channels.
+- `sniff.sdo.raw.filters` can restrict generic raw emission by node ID, object index, and
   sub-index. The specified fields within one filter are combined with AND;
   multiple filter entries are alternatives, combined with OR.
 
@@ -48,7 +52,7 @@ event is attributable to a specific node.
 
 ### Heartbeat / NMT state changes
 
-- **Enabled by**: `sniff.heartbeat.emit: logs` or `both`
+- **Enabled by**: `sniff.heartbeat.logs: true`
 - **Emitted**: only when a node's NMT state changes (not on every
   heartbeat), to avoid flooding logs on a node that stays in one state.
 - **Severity**: Info
@@ -57,7 +61,7 @@ event is attributable to a specific node.
 
 ### EMCY (emergency) messages
 
-- **Enabled by**: `sniff.emcy.emit: logs` or `both`
+- **Enabled by**: `sniff.emcy.logs: true`
 - **Emitted**: on every EMCY frame.
 - **Severity**: Warn (Info if the error code is `0x0000`, i.e. "error
   reset/no error").
@@ -67,7 +71,7 @@ event is attributable to a specific node.
 
 ### SDO traffic
 
-- **Enabled by**: `sniff.sdo.emit: logs` or `both`
+- **Enabled by**: `sniff.sdo.raw.logs: true`
 - **Emitted**: once when a standard expedited or segmented SDO transfer
   completes, or when an SDO abort is observed. Client frames use
   `0x600 + node ID`; server frames use `0x580 + node ID`.
@@ -79,9 +83,19 @@ event is attributable to a specific node.
 - This is passive observability of traffic between other CANopen devices; it
   neither sends SDO requests nor registers an SDO server.
 
+Generic raw SDO emission is opt-in under `sniff.sdo.raw`; its optional
+`raw.filters[]` allow-list applies only to that generic raw output. It is
+independent of typed object definitions. Typed SDO object definitions can
+additionally decode completed transfer
+payloads using the same datatype, scaling, and output settings as PDO signals.
+For example, an object definition for `0x20F0:11` can turn the raw payload
+into a firmware-version metric or log value. SDO filters select which
+transfers are observed; typed object definitions provide the datatype and
+output name for matching objects.
+
 ### User-configured PDO signal logs
 
-- **Enabled by**: the individual signal's `emit: logs` or `both`.
+- **Enabled by**: the individual signal's `logs: true`.
 - **Severity**: Info
 - **Attributes**: `canopen.signal.name`, `canopen.signal.value`,
   `canopen.pdo.name`, plus any user-configured `attributes`.

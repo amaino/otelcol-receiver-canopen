@@ -34,19 +34,26 @@ type transfer struct {
 }
 
 // Observer retains enough SDO state to reconstruct one standard transfer per
-// node. Standard SDO channels allow only one transfer per node at a time.
+// configured channel. A channel key keeps concurrent transfers for multiple
+// channels belonging to the same node independent.
 type Observer struct {
-	transfers map[uint8]*transfer
+	transfers map[uint32]*transfer
 }
 
 // New creates an empty passive observer.
 func New() *Observer {
-	return &Observer{transfers: make(map[uint8]*transfer)}
+	return &Observer{transfers: make(map[uint32]*transfer)}
 }
 
 // Observe consumes an observed standard SDO frame. It returns an event only
 // when a transfer completes or a server abort is observed.
 func (o *Observer) Observe(nodeID uint8, direction Direction, frame []byte) (*Event, error) {
+	return o.ObserveOnChannel(uint32(nodeID), nodeID, direction, frame)
+}
+
+// ObserveOnChannel consumes a frame belonging to a configured SDO channel.
+// channelKey must uniquely identify the channel within the observer.
+func (o *Observer) ObserveOnChannel(channelKey uint32, nodeID uint8, direction Direction, frame []byte) (*Event, error) {
 	if len(frame) == 0 {
 		return nil, nil
 	}
@@ -57,7 +64,7 @@ func (o *Observer) Observe(nodeID uint8, direction Direction, frame []byte) (*Ev
 		}
 		index, subIndex := objectAddress(frame)
 		abortCode := uint32(frame[4]) | uint32(frame[5])<<8 | uint32(frame[6])<<16 | uint32(frame[7])<<24
-		delete(o.transfers, nodeID)
+		delete(o.transfers, channelKey)
 		return &Event{
 			NodeID: nodeID, Direction: direction, Operation: "abort",
 			Index: index, SubIndex: subIndex, AbortCode: &abortCode,
@@ -66,21 +73,21 @@ func (o *Observer) Observe(nodeID uint8, direction Direction, frame []byte) (*Ev
 
 	switch direction {
 	case ClientToServer:
-		return o.observeClient(nodeID, command, frame)
+		return o.observeClient(channelKey, nodeID, command, frame)
 	case ServerToClient:
-		return o.observeServer(nodeID, command, frame)
+		return o.observeServer(channelKey, nodeID, command, frame)
 	default:
 		return nil, fmt.Errorf("unknown SDO direction %q", direction)
 	}
 }
 
-func (o *Observer) observeClient(nodeID uint8, command byte, frame []byte) (*Event, error) {
+func (o *Observer) observeClient(channelKey uint32, nodeID uint8, command byte, frame []byte) (*Event, error) {
 	if command == 0x40 {
 		if len(frame) < 4 {
 			return nil, fmt.Errorf("truncated SDO upload request for node %d", nodeID)
 		}
 		index, subIndex := objectAddress(frame)
-		o.transfers[nodeID] = &transfer{nodeID: nodeID, direction: ServerToClient, operation: "upload", index: index, subIndex: subIndex}
+		o.transfers[channelKey] = &transfer{nodeID: nodeID, direction: ServerToClient, operation: "upload", index: index, subIndex: subIndex}
 		return nil, nil
 	}
 	if command&0xE0 == 0x20 {
@@ -95,17 +102,17 @@ func (o *Observer) observeClient(nodeID uint8, command byte, frame []byte) (*Eve
 			}
 			return &Event{NodeID: nodeID, Direction: ClientToServer, Operation: "download", Index: index, SubIndex: subIndex, Data: data}, nil
 		}
-		o.transfers[nodeID] = &transfer{nodeID: nodeID, direction: ClientToServer, operation: "download", index: index, subIndex: subIndex}
+		o.transfers[channelKey] = &transfer{nodeID: nodeID, direction: ClientToServer, operation: "download", index: index, subIndex: subIndex}
 		return nil, nil
 	}
 	if command&0xE0 != 0 {
 		return nil, nil
 	}
-	return o.observeSegment(nodeID, ClientToServer, command, frame)
+	return o.observeSegment(channelKey, nodeID, ClientToServer, command, frame)
 }
 
-func (o *Observer) observeServer(nodeID uint8, command byte, frame []byte) (*Event, error) {
-	transfer := o.transfers[nodeID]
+func (o *Observer) observeServer(channelKey uint32, nodeID uint8, command byte, frame []byte) (*Event, error) {
+	transfer := o.transfers[channelKey]
 	if transfer == nil {
 		return nil, nil
 	}
@@ -115,7 +122,7 @@ func (o *Observer) observeServer(nodeID uint8, command byte, frame []byte) (*Eve
 			if err != nil {
 				return nil, err
 			}
-			delete(o.transfers, nodeID)
+			delete(o.transfers, channelKey)
 			return complete(transfer, data), nil
 		}
 		return nil, nil
@@ -126,11 +133,11 @@ func (o *Observer) observeServer(nodeID uint8, command byte, frame []byte) (*Eve
 	if command&0xE0 != 0 {
 		return nil, nil
 	}
-	return o.observeSegment(nodeID, ServerToClient, command, frame)
+	return o.observeSegment(channelKey, nodeID, ServerToClient, command, frame)
 }
 
-func (o *Observer) observeSegment(nodeID uint8, direction Direction, command byte, frame []byte) (*Event, error) {
-	transfer := o.transfers[nodeID]
+func (o *Observer) observeSegment(channelKey uint32, nodeID uint8, direction Direction, command byte, frame []byte) (*Event, error) {
+	transfer := o.transfers[channelKey]
 	if transfer == nil || transfer.direction != direction {
 		return nil, nil
 	}
@@ -139,7 +146,7 @@ func (o *Observer) observeSegment(nodeID uint8, direction Direction, command byt
 	}
 	toggle := command&0x10 != 0
 	if toggle != transfer.toggle {
-		delete(o.transfers, nodeID)
+		delete(o.transfers, channelKey)
 		return nil, fmt.Errorf("unexpected SDO toggle bit for node %d", nodeID)
 	}
 	unused := int((command >> 1) & 0x07)
@@ -148,7 +155,7 @@ func (o *Observer) observeSegment(nodeID uint8, direction Direction, command byt
 		unused = 0
 	}
 	if unused > 7 || len(frame) < 8 {
-		delete(o.transfers, nodeID)
+		delete(o.transfers, channelKey)
 		return nil, fmt.Errorf("truncated SDO segment for node %d", nodeID)
 	}
 	transfer.data = append(transfer.data, frame[1:8-unused]...)
@@ -156,7 +163,7 @@ func (o *Observer) observeSegment(nodeID uint8, direction Direction, command byt
 	if !last {
 		return nil, nil
 	}
-	delete(o.transfers, nodeID)
+	delete(o.transfers, channelKey)
 	return complete(transfer, transfer.data), nil
 }
 

@@ -39,15 +39,25 @@ receivers:
     sniff:
       enabled: true
       heartbeat:
-        emit: logs
+        logs: true
       emcy:
-        emit: both
+        metrics: true
+        logs: true
       sdo:
-        emit: both
-        filters:
+        channels:
           - node_id: 1
-            index: 0x2001
-            sub_index: 0x00
+            client_to_server_cob_id: 0x601
+            server_to_client_cob_id: 0x581
+          - node_id: 1
+            client_to_server_cob_id: 0x611
+            server_to_client_cob_id: 0x591
+        raw:
+          metrics: true
+          logs: true
+          filters:
+            - node_id: 1
+              index: 0x2001
+              sub_index: 0x00
       pdos:
         - name: motor_tpdo1
           cob_id: 0x181
@@ -57,7 +67,7 @@ receivers:
               type: int16
               scale: 0.1
               unit: rpm
-              emit: metrics
+              metrics: true
               metric_type: gauge
               attributes:
                 axis: x
@@ -77,25 +87,34 @@ receivers:
 | `sniff.*` | | | See below. |
 
 At least one of `metrics.enabled`/`logs.enabled` must be true, and
-`sniff.enabled` must be true. Any signal that requests `emit: metrics`
-requires `metrics.enabled: true` (likewise for `logs`); this is validated at
-startup.
+`sniff.enabled` must be true. Any event or signal that requests `metrics: true` requires
+`metrics.enabled: true` (likewise for `logs`); this is validated at startup.
 
 ### Sniffing (`sniff`)
 
 | Field | Type | Description |
 |---|---|---|
 | `sniff.enabled` | bool | Enables passive sniffing. |
-| `sniff.heartbeat.emit` | `metrics`\|`logs`\|`both` | Emit a `canopen.node.nmt_state` gauge on every heartbeat, and/or a log record only when a node's NMT state changes. |
-| `sniff.emcy.emit` | `metrics`\|`logs`\|`both` | Emit a `canopen.node.emcy_error_register` gauge, and/or a log record for every EMCY frame. |
-| `sniff.sdo.emit` | `metrics`\|`logs`\|`both` | Passively observe standard SDO transfers, including expedited and segmented upload/download exchanges. Emits one `canopen.sdo.transfers` sum point and/or one completed-transfer/abort log. No SDO requests are initiated. |
-| `sniff.sdo.filters[]` | list | Optional allow-list. A completed transfer/abort is emitted if it matches any entry; no entries emits all observed transfers. |
-| `sniff.sdo.filters[].node_id` | int (1-127) | Optional node ID selector. |
-| `sniff.sdo.filters[].index` | int | Optional object dictionary index selector. |
-| `sniff.sdo.filters[].sub_index` | int | Optional object dictionary sub-index selector. |
+| `sniff.heartbeat.metrics` / `.logs` | bool | Enable the `canopen.node.nmt_state` gauge and/or a log record only when a node's NMT state changes. |
+| `sniff.emcy.metrics` / `.logs` | bool | Enable the `canopen.node.emcy_error_register` gauge and/or a log record for every EMCY frame. |
+| `sniff.sdo.channels[]` | list | Optional SDO channels to observe. If omitted, the predefined channel (`0x600 + node_id`, `0x580 + node_id`) is used for all nodes. |
+| `sniff.sdo.channels[].node_id` | int (1-127) | Node ID served by this SDO channel. |
+| `sniff.sdo.channels[].client_to_server_cob_id` | int | Client-to-server standard CAN COB-ID (`0x000..0x7FF`). It does not have to use the conventional CANopen SDO range. |
+| `sniff.sdo.channels[].server_to_client_cob_id` | int | Server-to-client standard CAN COB-ID (`0x000..0x7FF`). Nonstandard assignments are accepted at the operator's responsibility. |
+| `sniff.sdo.raw.metrics` / `.logs` | bool | Opt in to generic raw SDO telemetry: one `canopen.sdo.transfers` sum point and/or one completed-transfer/abort log carrying the payload as hex. Typed `sniff.sdo.objects[]` output is independent of this setting. |
+| `sniff.sdo.raw.filters[]` | list | Optional allow-list for generic raw SDO emission. A completed transfer/abort is emitted if it matches any entry; no entries emits all observed transfers. Typed `sniff.sdo.objects[]` are matched independently and do not need to be duplicated here. |
+| `sniff.sdo.raw.filters[].node_id` | int (1-127) | Optional node ID selector. |
+| `sniff.sdo.raw.filters[].index` | int | Optional object dictionary index selector. |
+| `sniff.sdo.raw.filters[].sub_index` | int | Optional object dictionary sub-index selector. |
+| `sniff.sdo.objects[]` | list | Optional typed object definitions. Matching completed SDO transfers are decoded using the declared datatype and emitted as named metrics/logs. |
+| `sniff.sdo.objects[].node_id` | int (1-127) | Node ID of the object. |
+| `sniff.sdo.objects[].index` / `.sub_index` | int | Object dictionary address. |
+| `sniff.sdo.objects[].name` | string | Metric name and log signal name. |
+| `sniff.sdo.objects[].type` | string | Datatype, using the same types as PDO signals. |
+| `sniff.sdo.objects[].metrics` / `.logs` | bool | Enable metric and/or log emission for the decoded value. |
 
-An individual filter combines its specified fields with AND; separate filters
-are ORed. For example, `{node_id: 1, index: 0x2001, sub_index: 0}` selects
+An individual raw filter combines its specified fields with AND; separate
+filters are ORed. For example, `{node_id: 1, index: 0x2001, sub_index: 0}` selects
 only that object on node 1. The receiver correlates standard SDO frames and
 reassembles expedited and segmented upload/download transfers before applying
 these filters and emitting telemetry.
@@ -116,7 +135,8 @@ Used by `sniff.pdos[].signals[]`:
 | `byte_len` | int | Required for `bytes`/`visible_string`; ignored otherwise. |
 | `scale` / `offset` | float | Linear transform applied as `value*scale + offset` (scale defaults to 1). |
 | `unit` | string | Attached to the emitted metric. |
-| `emit` | `metrics`\|`logs`\|`both` | Where this signal is emitted. |
+| `metrics` | bool | Emit this signal as a metric. Requires top-level `metrics.enabled: true`. |
+| `logs` | bool | Emit this signal as a log record. Requires top-level `logs.enabled: true`. |
 | `metric_type` | `gauge`\|`sum` | Metric point type when emitting metrics (default `gauge`). |
 | `attributes` | map[string]string | Extra static attributes attached to every emitted data point/log record. |
 

@@ -89,6 +89,29 @@ type SDOFilter struct {
 	SubIndex *uint8
 }
 
+type SDOObjectDef struct {
+	NodeID     uint8
+	Index      uint16
+	SubIndex   uint8
+	Name       string
+	Type       codec.DataType
+	ByteLen    int
+	Scale      float64
+	Offset     float64
+	Unit       string
+	EmitMetric bool
+	EmitLog    bool
+	MetricSum  bool
+	Attributes map[string]string
+}
+
+// SDOChannel identifies one configured SDO client/server COB-ID pair.
+type SDOChannel struct {
+	NodeID              uint8
+	ClientToServerCobID uint32
+	ServerToClientCobID uint32
+}
+
 // Config is the subset of receiver configuration the Sniffer needs,
 // expressed in terms independent of the top-level config package.
 type Config struct {
@@ -101,6 +124,8 @@ type Config struct {
 	SDOEmitMetric       bool
 	SDOEmitLog          bool
 	SDOFilters          []SDOFilter
+	SDOObjects          []SDOObjectDef
+	SDOChannels         []SDOChannel
 }
 
 // Sniffer classifies and decodes frames according to Config, appending
@@ -111,13 +136,29 @@ type Sniffer struct {
 	// nmtState tracks the last known state per node id, to detect changes
 	// and avoid re-emitting logs for repeated identical heartbeats when only
 	// state-change logging is desired. Metrics are still updated every time.
-	nmtState map[uint8]NMTState
-	sdo      *sdoobserver.Observer
+	nmtState   map[uint8]NMTState
+	sdo        *sdoobserver.Observer
+	sdoByCobID map[uint32]sdoChannel
+}
+
+type sdoChannel struct {
+	nodeID      uint8
+	key         uint32
+	clientCobID uint32
 }
 
 // New creates a Sniffer for the given configuration.
 func New(cfg Config) *Sniffer {
-	return &Sniffer{cfg: cfg, nmtState: make(map[uint8]NMTState), sdo: sdoobserver.New()}
+	s := &Sniffer{cfg: cfg, nmtState: make(map[uint8]NMTState), sdo: sdoobserver.New(), sdoByCobID: make(map[uint32]sdoChannel)}
+	if len(cfg.SDOChannels) == 0 {
+		return s
+	}
+	for _, channel := range cfg.SDOChannels {
+		entry := sdoChannel{nodeID: channel.NodeID, key: channel.ClientToServerCobID, clientCobID: channel.ClientToServerCobID}
+		s.sdoByCobID[channel.ClientToServerCobID] = entry
+		s.sdoByCobID[channel.ServerToClientCobID] = entry
+	}
+	return s
 }
 
 // HandleFrame classifies and decodes a single received frame, appending any
@@ -135,6 +176,17 @@ func (s *Sniffer) HandleFrame(f cantransport.Frame, metrics *emit.MetricsBuilder
 		return
 	}
 
+	if channel, ok := s.sdoByCobID[f.ID]; ok {
+		direction := sdoobserver.ClientToServer
+		if f.ID == channel.clientCobID {
+			direction = sdoobserver.ClientToServer
+		} else {
+			direction = sdoobserver.ServerToClient
+		}
+		s.handleSDO(channel.key, channel.nodeID, direction, f, metrics, logs)
+		return
+	}
+
 	funcCode := f.ID &^ 0x7F
 	nodeID := uint8(f.ID & 0x7F)
 
@@ -147,11 +199,11 @@ func (s *Sniffer) HandleFrame(f cantransport.Frame, metrics *emit.MetricsBuilder
 		}
 	case FuncSDOTx:
 		if nodeID != 0 {
-			s.handleSDO(nodeID, sdoobserver.ServerToClient, f, metrics, logs)
+			s.handleSDO(f.ID-0x580, nodeID, sdoobserver.ServerToClient, f, metrics, logs)
 		}
 	case FuncSDORx:
 		if nodeID != 0 {
-			s.handleSDO(nodeID, sdoobserver.ClientToServer, f, metrics, logs)
+			s.handleSDO(f.ID-0x600, nodeID, sdoobserver.ClientToServer, f, metrics, logs)
 		}
 	}
 }
@@ -310,9 +362,13 @@ func (s *Sniffer) handleEMCY(nodeID uint8, f cantransport.Frame, logs *emit.Logs
 // handleSDO observes, but never participates in, SDO frames exchanged by
 // other CANopen devices on the bus. It emits only completed transfers and
 // aborts, after reconstructing segmented payloads where required.
-func (s *Sniffer) handleSDO(nodeID uint8, direction sdoobserver.Direction, f cantransport.Frame, metrics *emit.MetricsBuilder, logs *emit.LogsBuilder) {
-	event, err := s.sdo.Observe(nodeID, direction, f.Data)
-	if err != nil || event == nil || !s.matchesSDOFilter(event.NodeID, event.Index, event.SubIndex) {
+func (s *Sniffer) handleSDO(channelKey uint32, nodeID uint8, direction sdoobserver.Direction, f cantransport.Frame, metrics *emit.MetricsBuilder, logs *emit.LogsBuilder) {
+	event, err := s.sdo.ObserveOnChannel(channelKey, nodeID, direction, f.Data)
+	if err != nil || event == nil {
+		return
+	}
+	if !s.matchesSDOFilter(event.NodeID, event.Index, event.SubIndex) {
+		s.emitTypedSDO(*event, metrics, logs)
 		return
 	}
 	attrs := s.resourceAttrs()
@@ -351,6 +407,56 @@ func (s *Sniffer) handleSDO(nodeID uint8, direction sdoobserver.Direction, f can
 			Body:          fmt.Sprintf("canopen SDO %s %s on node %d (0x%04X:%02X)", event.Direction, event.Operation, event.NodeID, event.Index, event.SubIndex),
 			Attributes:    logAttrs,
 		})
+	}
+	s.emitTypedSDO(*event, metrics, logs)
+}
+
+func (s *Sniffer) emitTypedSDO(event sdoobserver.Event, metrics *emit.MetricsBuilder, logs *emit.LogsBuilder) {
+	if event.AbortCode != nil {
+		return
+	}
+	for _, object := range s.cfg.SDOObjects {
+		if object.NodeID != event.NodeID || object.Index != event.Index || object.SubIndex != event.SubIndex {
+			continue
+		}
+		decoded, err := codec.Decode(event.Data, object.Type, 0, object.ByteLen)
+		if err != nil {
+			continue
+		}
+		value := codec.ApplyScale(decoded, object.Scale, object.Offset)
+		attrs := s.resourceAttrs()
+		attrs["canopen.node_id"] = fmt.Sprintf("%d", event.NodeID)
+		attrs["canopen.sdo.index"] = fmt.Sprintf("0x%04X", event.Index)
+		attrs["canopen.sdo.subindex"] = fmt.Sprintf("0x%02X", event.SubIndex)
+		if object.EmitMetric && metrics != nil {
+			kind := emit.KindGauge
+			if object.MetricSum {
+				kind = emit.KindSum
+			}
+			metrics.Add(emit.MetricPoint{
+				ResourceAttrs: attrs, Name: object.Name, Unit: object.Unit,
+				Kind: kind, Value: value, Attributes: object.Attributes,
+			})
+		}
+		if object.EmitLog && logs != nil {
+			logAttrs := map[string]any{
+				"canopen.node_id":       int(event.NodeID),
+				"canopen.sdo.index":     int(event.Index),
+				"canopen.sdo.subindex":  int(event.SubIndex),
+				"canopen.sdo.direction": string(event.Direction),
+				"canopen.sdo.operation": event.Operation,
+				"canopen.signal.name":   object.Name,
+				"canopen.signal.value":  value,
+			}
+			for key, attr := range object.Attributes {
+				logAttrs[key] = attr
+			}
+			logs.Add(emit.LogRecord{
+				ResourceAttrs: attrs, Severity: plog.SeverityNumberInfo,
+				Body:       fmt.Sprintf("canopen SDO object 0x%04X:%02X %s = %v", event.Index, event.SubIndex, object.Name, value),
+				Attributes: logAttrs,
+			})
+		}
 	}
 }
 
