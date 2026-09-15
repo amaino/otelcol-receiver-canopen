@@ -1,11 +1,11 @@
 # Configuration for the OpenTelemetry Collector Builder (ocb):
 # https://github.com/open-telemetry/opentelemetry-collector/tree/main/cmd/builder
 #
-# This is the bare starting point for the "otelcol-canopen" distribution:
-# just the standard OTLP receiver/exporter plus batch/memory_limiter, so the
-# whole device-build/devcontainer/CI pipeline can be exercised before any
-# CANopen-specific code exists. The canopen receiver is added to this file
-# in a later commit once it is implemented.
+# Produces a single "otelcol-canopen" binary containing the CANopen
+# receiver (currently: passive sniffing only) plus a practical starter set
+# of core/contrib processors and exporters, so the receiver can be combined
+# with normal Collector pipeline components on a real device today (see
+# config/example-collector.yaml).
 #
 # Build with: make build-device   (wraps `ocb --config=builder-config.yaml`)
 dist:
@@ -17,6 +17,7 @@ dist:
 
 receivers:
   - gomod: go.opentelemetry.io/collector/receiver/otlpreceiver v0.159.0
+  - gomod: github.com/amaino/otelcol-receiver-canopen/receiver/canopenreceiver v0.1.0
 
 processors:
   - gomod: go.opentelemetry.io/collector/processor/batchprocessor v0.159.0
@@ -29,3 +30,10 @@ exporters:
 
 extensions:
   - gomod: go.opentelemetry.io/collector/extension/zpagesextension v0.159.0
+
+# While the receiver hasn't been published/tagged yet, point ocb at the
+# local module so `make build-device` works from a checkout. Paths are
+# relative to output_path (./dist), so we go up one level back to the repo
+# root and into receiver/canopenreceiver.
+replaces:
+  - github.com/amaino/otelcol-receiver-canopen/receiver/canopenreceiver => ../receiver/canopenreceiver

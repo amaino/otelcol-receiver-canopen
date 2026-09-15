@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Sets up a virtual CAN (vcan0) interface for local development and testing,
-# so the receiver, canopen-publisher, and canopen-sdo-server tools can be
-# exercised without real CAN hardware. Safe to re-run.
+# so the receiver and canopen-publisher tool can be exercised without real
+# CAN hardware. Safe to re-run.
 set -euo pipefail
 
 IFACE="${1:-vcan0}"

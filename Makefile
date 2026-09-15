@@ -1,4 +1,4 @@
-.PHONY: build test vet fmt fmt-check lint tidy vcan-up build-device
+.PHONY: build test vet fmt fmt-check lint tidy vcan-up run-publisher build-device
 
 ## Core Go targets
 
@@ -29,6 +29,9 @@ tidy:
 
 vcan-up:
 	bash .devcontainer/setup-vcan.sh vcan0
+
+run-publisher:
+	go run ./cmd/canopen-publisher -iface=vcan0
 
 ## Device build via the OpenTelemetry Collector Builder (ocb)
 
