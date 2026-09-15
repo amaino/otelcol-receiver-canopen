@@ -248,6 +248,113 @@ func (s *SDOSniffConfig) validate() error {
 	return nil
 }
 
+// RawMatchByte is a byte-equality condition used to discriminate between
+// multiple raw message shapes that share the same COB-ID (e.g. several
+// vendor commands multiplexed onto one CAN ID, distinguished by an echoed
+// command word at a fixed offset).
+type RawMatchByte struct {
+	ByteOffset int   `mapstructure:"byte_offset"`
+	Value      uint8 `mapstructure:"value"`
+}
+
+func (m *RawMatchByte) validate(scope string) error {
+	if m.ByteOffset < 0 || m.ByteOffset > 7 {
+		return fmt.Errorf("%s: byte_offset must be 0..7", scope)
+	}
+	return nil
+}
+
+// RawMessageConfig declares a decodable shape for frames on a given COB-ID
+// that are not standard CANopen SDO/PDO framing (e.g. a vendor
+// application-layer command/response). Match narrows which frames on
+// CobID this definition applies to (useful when one COB-ID multiplexes
+// several command types); an empty Match matches every frame on CobID.
+// Signals decode fields from the payload exactly like a PDO's signals,
+// using the same types/bit offsets/scale, so no bespoke processor is
+// needed for fixed-layout vendor protocols.
+type RawMessageConfig struct {
+	Name    string         `mapstructure:"name"`
+	CobID   uint32         `mapstructure:"cob_id"`
+	Match   []RawMatchByte `mapstructure:"match"`
+	Signals []SignalConfig `mapstructure:"signals"`
+}
+
+func (r *RawMessageConfig) validate() error {
+	if r.Name == "" {
+		return errors.New("sniff.raw.messages: name must not be empty")
+	}
+	if r.CobID == 0 || r.CobID > 0x7FF {
+		return fmt.Errorf("raw message %q: cob_id 0x%X out of range for an 11-bit standard COB-ID", r.Name, r.CobID)
+	}
+	for i := range r.Match {
+		if err := r.Match[i].validate(fmt.Sprintf("raw message %q match[%d]", r.Name, i)); err != nil {
+			return err
+		}
+	}
+	if len(r.Signals) == 0 {
+		return fmt.Errorf("raw message %q: must declare at least one signal", r.Name)
+	}
+	seen := make(map[string]struct{}, len(r.Signals))
+	for i := range r.Signals {
+		if err := r.Signals[i].validate(fmt.Sprintf("raw message %q signal", r.Name)); err != nil {
+			return err
+		}
+		if _, dup := seen[r.Signals[i].Name]; dup {
+			return fmt.Errorf("raw message %q: duplicate signal name %q", r.Name, r.Signals[i].Name)
+		}
+		seen[r.Signals[i].Name] = struct{}{}
+	}
+	return nil
+}
+
+// RawFrameConfig configures passive capture of arbitrary CAN frames that are
+// not decoded by any other sniffing feature. By default (no Messages
+// declared for a CobID) it performs no protocol interpretation and matching
+// frames are emitted as their raw hex payload; when a Messages entry
+// declares field layout for a CobID, matching frames are decoded into named
+// signals instead. This is intended for vendor/proprietary traffic riding on
+// the bus (e.g. diagnostic or service-tool protocols) without teaching this
+// receiver vendor-specific semantics beyond a declarative field layout.
+type RawFrameConfig struct {
+	Metrics bool `mapstructure:"metrics"`
+	Logs    bool `mapstructure:"logs"`
+	// CobIDs lists the exact 11-bit standard COB-IDs to capture as raw
+	// frames. Frames on IDs already handled by another sniffing feature
+	// (a configured PDO, heartbeat, EMCY, or standard SDO) are not
+	// affected by this list unless explicitly included here, in which
+	// case the raw capture takes precedence for that COB-ID.
+	CobIDs []uint32 `mapstructure:"cob_ids"`
+	// Messages declare a decodable field layout for frames on a CobID,
+	// optionally narrowed by Match. When a frame's CobID has one or more
+	// Messages and matches one of them, its signals are decoded and
+	// emitted under their configured names instead of a raw hex dump.
+	Messages []RawMessageConfig `mapstructure:"messages"`
+}
+
+func (r *RawFrameConfig) validate() error {
+	seen := make(map[uint32]struct{}, len(r.CobIDs))
+	for _, id := range r.CobIDs {
+		if id > 0x7FF {
+			return fmt.Errorf("sniff.raw.cob_ids: 0x%X out of range for an 11-bit standard COB-ID", id)
+		}
+		if _, dup := seen[id]; dup {
+			return fmt.Errorf("sniff.raw.cob_ids: duplicate cob_id 0x%X", id)
+		}
+		seen[id] = struct{}{}
+	}
+	seenNames := make(map[string]struct{}, len(r.Messages))
+	for i := range r.Messages {
+		if err := r.Messages[i].validate(); err != nil {
+			return fmt.Errorf("sniff.raw.messages[%d]: %w", i, err)
+		}
+		if _, dup := seenNames[r.Messages[i].Name]; dup {
+			return fmt.Errorf("sniff.raw.messages: duplicate name %q", r.Messages[i].Name)
+		}
+		seenNames[r.Messages[i].Name] = struct{}{}
+	}
+	return nil
+}
+
 // SniffConfig configures passive traffic sniffing.
 type SniffConfig struct {
 	Enabled   bool              `mapstructure:"enabled"`
@@ -257,6 +364,9 @@ type SniffConfig struct {
 	// initiate transfers; active polling is a separate future capability.
 	SDO  SDOSniffConfig `mapstructure:"sdo"`
 	PDOs []PDOConfig    `mapstructure:"pdos"`
+	// Raw captures arbitrary CAN IDs as undecoded hex payload; see
+	// RawFrameConfig.
+	Raw RawFrameConfig `mapstructure:"raw"`
 }
 
 func (s *SniffConfig) validate() error {
@@ -270,6 +380,9 @@ func (s *SniffConfig) validate() error {
 		return err
 	}
 	if err := s.SDO.validate(); err != nil {
+		return err
+	}
+	if err := s.Raw.validate(); err != nil {
 		return err
 	}
 	seen := make(map[string]struct{}, len(s.PDOs))
@@ -373,6 +486,9 @@ func (cfg *Config) Validate() error {
 	if err := checkOutputs("sniff.sdo.raw", cfg.Sniff.SDO.Raw.Metrics, cfg.Sniff.SDO.Raw.Logs); err != nil {
 		return err
 	}
+	if err := checkOutputs("sniff.raw", cfg.Sniff.Raw.Metrics, cfg.Sniff.Raw.Logs); err != nil {
+		return err
+	}
 	for _, pdo := range cfg.Sniff.PDOs {
 		for _, sig := range pdo.Signals {
 			if err := checkOutputs(fmt.Sprintf("pdo %q signal %q", pdo.Name, sig.Name), sig.Metrics, sig.Logs); err != nil {
@@ -383,6 +499,13 @@ func (cfg *Config) Validate() error {
 	for _, object := range cfg.Sniff.SDO.Objects {
 		if err := checkOutputs(fmt.Sprintf("sdo object %q", object.Name), object.Metrics, object.Logs); err != nil {
 			return err
+		}
+	}
+	for _, msg := range cfg.Sniff.Raw.Messages {
+		for _, sig := range msg.Signals {
+			if err := checkOutputs(fmt.Sprintf("raw message %q signal %q", msg.Name, sig.Name), sig.Metrics, sig.Logs); err != nil {
+				return err
+			}
 		}
 	}
 	return nil

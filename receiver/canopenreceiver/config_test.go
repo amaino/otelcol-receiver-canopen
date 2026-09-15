@@ -185,3 +185,108 @@ func TestConfig_Validate_SDOObjectRequiresMetricsEnabled(t *testing.T) {
 	}}
 	require.Error(t, cfg.Validate())
 }
+
+func TestConfig_Validate_RawEmitRequiresLogsEnabled(t *testing.T) {
+	cfg := validBaseConfig()
+	cfg.Logs.Enabled = false
+	cfg.Sniff.Raw.Logs = true
+	require.Error(t, cfg.Validate())
+}
+
+func TestConfig_Validate_RawCobIDOutOfRange(t *testing.T) {
+	cfg := validBaseConfig()
+	cfg.Sniff.Raw.CobIDs = []uint32{0x800}
+	require.Error(t, cfg.Validate())
+}
+
+func TestConfig_Validate_RawCobIDDuplicate(t *testing.T) {
+	cfg := validBaseConfig()
+	cfg.Sniff.Raw.CobIDs = []uint32{0x50E, 0x50E}
+	require.Error(t, cfg.Validate())
+}
+
+func TestConfig_Validate_RawCobIDOK(t *testing.T) {
+	cfg := validBaseConfig()
+	cfg.Sniff.Raw.Metrics = true
+	cfg.Sniff.Raw.Logs = true
+	cfg.Sniff.Raw.CobIDs = []uint32{0x50E, 0x48E}
+	require.NoError(t, cfg.Validate())
+}
+
+func TestConfig_Validate_RawMessageOK(t *testing.T) {
+	cfg := validBaseConfig()
+	cfg.Sniff.Raw.Metrics = true
+	cfg.Sniff.Raw.Logs = true
+	cfg.Sniff.Raw.Messages = []RawMessageConfig{
+		{
+			Name:  "truckcom.read_fw_part_no",
+			CobID: 0x50E,
+			Match: []RawMatchByte{{ByteOffset: 0, Value: 0x08}, {ByteOffset: 1, Value: 0x80}},
+			Signals: []SignalConfig{
+				{Name: "truckcom.fw_part_no", BitOffset: 16, Type: codec.Uint32, Metrics: true},
+			},
+		},
+	}
+	require.NoError(t, cfg.Validate())
+}
+
+func TestConfig_Validate_RawMessageEmptyName(t *testing.T) {
+	cfg := validBaseConfig()
+	cfg.Sniff.Raw.Messages = []RawMessageConfig{
+		{CobID: 0x50E, Signals: []SignalConfig{{Name: "sig", Type: codec.Uint8, Metrics: true}}},
+	}
+	require.Error(t, cfg.Validate())
+}
+
+func TestConfig_Validate_RawMessageBadCobID(t *testing.T) {
+	cfg := validBaseConfig()
+	cfg.Sniff.Raw.Messages = []RawMessageConfig{
+		{Name: "m1", CobID: 0x800, Signals: []SignalConfig{{Name: "sig", Type: codec.Uint8, Metrics: true}}},
+	}
+	require.Error(t, cfg.Validate())
+}
+
+func TestConfig_Validate_RawMessageNoSignals(t *testing.T) {
+	cfg := validBaseConfig()
+	cfg.Sniff.Raw.Messages = []RawMessageConfig{{Name: "m1", CobID: 0x50E}}
+	require.Error(t, cfg.Validate())
+}
+
+func TestConfig_Validate_RawMessageBadMatchByteOffset(t *testing.T) {
+	cfg := validBaseConfig()
+	cfg.Sniff.Raw.Messages = []RawMessageConfig{
+		{
+			Name:    "m1",
+			CobID:   0x50E,
+			Match:   []RawMatchByte{{ByteOffset: 8, Value: 0}},
+			Signals: []SignalConfig{{Name: "sig", Type: codec.Uint8, Metrics: true}},
+		},
+	}
+	require.Error(t, cfg.Validate())
+}
+
+func TestConfig_Validate_RawMessageDuplicateName(t *testing.T) {
+	cfg := validBaseConfig()
+	msg := RawMessageConfig{
+		Name:    "m1",
+		CobID:   0x50E,
+		Signals: []SignalConfig{{Name: "sig", Type: codec.Uint8, Metrics: true}},
+	}
+	cfg.Sniff.Raw.Messages = []RawMessageConfig{msg, msg}
+	require.Error(t, cfg.Validate())
+}
+
+func TestConfig_Validate_RawMessageDuplicateSignalName(t *testing.T) {
+	cfg := validBaseConfig()
+	cfg.Sniff.Raw.Messages = []RawMessageConfig{
+		{
+			Name:  "m1",
+			CobID: 0x50E,
+			Signals: []SignalConfig{
+				{Name: "sig", Type: codec.Uint8, Metrics: true},
+				{Name: "sig", Type: codec.Uint8, Metrics: true},
+			},
+		},
+	}
+	require.Error(t, cfg.Validate())
+}
