@@ -72,7 +72,9 @@ type SignalConfig struct {
 
 	// Attributes are additional static resource/datapoint attributes
 	// attached to every emitted metric data point / log record for this
-	// signal.
+	// signal. Values may be strings, bools, or numbers; numeric YAML
+	// scalars are preserved as numeric OTLP attributes (see
+	// validateStaticAttributes and emit.putAttribute).
 	Attributes map[string]any `mapstructure:"attributes"`
 }
 
@@ -103,13 +105,18 @@ func (s *SignalConfig) validate(scope string) error {
 	return nil
 }
 
+// validateStaticAttributes checks that each configured attribute value has a
+// type the confmap YAML decoder can actually produce: string, bool, int
+// (the platform word size; only used for values that fit in it), int64
+// (larger signed values, notably on 32-bit builds), uint64 (positive values
+// too large for int64), or float64 (values with a decimal point, or ones
+// too large for int64/uint64). No other types are reachable from config, so
+// none of Go's narrower numeric types (int8/16/32, uint/8/16/32, float32)
+// are accepted here.
 func validateStaticAttributes(scope string, attrs map[string]any) error {
 	for key, value := range attrs {
 		switch value := value.(type) {
-		case string, bool,
-			int, int8, int16, int32, int64,
-			uint, uint8, uint16, uint32,
-			float32, float64:
+		case string, bool, int, int64, float64:
 		case uint64:
 			if value > math.MaxInt64 {
 				return fmt.Errorf("%s attribute %q: uint64 value %d exceeds supported int64 range", scope, key, value)
