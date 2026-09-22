@@ -19,7 +19,15 @@ func TestSniffer_PDO(t *testing.T) {
 				Name:  "motor_tpdo1",
 				CobID: 0x181,
 				Signals: []PDOSignal{
-					{Name: "canopen.motor.speed", BitOffset: 0, Type: codec.Int16, Scale: 0.1, EmitMetric: true},
+					{
+						Name:       "canopen.motor.speed",
+						BitOffset:  0,
+						Type:       codec.Int16,
+						Scale:      0.1,
+						EmitMetric: true,
+						EmitLog:    true,
+						Attributes: map[string]any{"axis": "x", "priority": 200},
+					},
 				},
 			},
 		},
@@ -37,6 +45,13 @@ func TestSniffer_PDO(t *testing.T) {
 	assert.Equal(t, "canopen.motor.speed", m.Name())
 	dp := m.Gauge().DataPoints().At(0)
 	assert.InDelta(t, 100.0, dp.DoubleValue(), 0.001)
+	assert.Equal(t, "x", dp.Attributes().AsRaw()["axis"])
+	assert.Equal(t, int64(200), dp.Attributes().AsRaw()["priority"])
+
+	ld := logs.Emit()
+	lr := ld.ResourceLogs().At(0).ScopeLogs().At(0).LogRecords().At(0)
+	assert.Equal(t, "x", lr.Attributes().AsRaw()["axis"])
+	assert.Equal(t, int64(200), lr.Attributes().AsRaw()["priority"])
 }
 
 func TestSniffer_Heartbeat_StateChangeLogging(t *testing.T) {
@@ -140,7 +155,8 @@ func TestSniffer_TypedSDOObject(t *testing.T) {
 		SDOEmitLog:    true,
 		SDOObjects: []SDOObjectDef{{
 			NodeID: 1, Index: 0x20F0, SubIndex: 0x11,
-			Name: "canopen.mcu.firmware", Type: codec.Uint32, EmitMetric: true,
+			Name: "canopen.mcu.firmware", Type: codec.Uint32, EmitMetric: true, EmitLog: true,
+			Attributes: map[string]any{"priority": 100},
 		}},
 	})
 	metrics := emit.NewMetricsBuilder()
@@ -154,6 +170,12 @@ func TestSniffer_TypedSDOObject(t *testing.T) {
 	metric := md.ResourceMetrics().At(0).ScopeMetrics().At(0).Metrics().At(0)
 	assert.Equal(t, "canopen.mcu.firmware", metric.Name())
 	assert.Equal(t, float64(7715102), metric.Gauge().DataPoints().At(0).DoubleValue())
+	assert.Equal(t, int64(100), metric.Gauge().DataPoints().At(0).Attributes().AsRaw()["priority"])
+
+	ld := logs.Emit()
+	records := ld.ResourceLogs().At(0).ScopeLogs().At(0).LogRecords()
+	record := records.At(records.Len() - 1)
+	assert.Equal(t, int64(100), record.Attributes().AsRaw()["priority"])
 }
 
 func TestSniffer_TypedSDOObjectDoesNotRequireRawFilter(t *testing.T) {

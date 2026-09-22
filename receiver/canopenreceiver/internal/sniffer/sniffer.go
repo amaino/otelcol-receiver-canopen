@@ -72,7 +72,7 @@ type PDOSignal struct {
 	EmitMetric bool
 	EmitLog    bool
 	MetricSum  bool // false = gauge
-	Attributes map[string]string
+	Attributes map[string]any
 }
 
 // PDODef is a configured PDO (fixed COB-ID) with its signals to decode.
@@ -102,7 +102,7 @@ type SDOObjectDef struct {
 	EmitMetric bool
 	EmitLog    bool
 	MetricSum  bool
-	Attributes map[string]string
+	Attributes map[string]any
 }
 
 // SDOChannel identifies one configured SDO client/server COB-ID pair.
@@ -373,7 +373,7 @@ func (s *Sniffer) handleSDO(channelKey uint32, nodeID uint8, direction sdoobserv
 	}
 	attrs := s.resourceAttrs()
 	attrs["canopen.node_id"] = fmt.Sprintf("%d", event.NodeID)
-	eventAttrs := map[string]string{
+	eventAttrs := map[string]any{
 		"canopen.sdo.direction": string(event.Direction),
 		"canopen.sdo.operation": event.Operation,
 		"canopen.sdo.index":     fmt.Sprintf("0x%04X", event.Index),

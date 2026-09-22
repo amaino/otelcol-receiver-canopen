@@ -47,3 +47,4 @@ sniff:
           metric_type: gauge
           attributes:
             axis: x
+            priority: 200
