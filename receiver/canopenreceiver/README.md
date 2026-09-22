@@ -102,15 +102,36 @@ At least one of `metrics.enabled`/`logs.enabled` must be true, and
 | `sniff.enabled` | bool | Enables passive sniffing. |
 | `sniff.heartbeat.metrics` / `.logs` | bool | Enable the `canopen.node.nmt_state` gauge and/or a log record only when a node's NMT state changes. |
 | `sniff.emcy.metrics` / `.logs` | bool | Enable the `canopen.node.emcy_error_register` gauge and/or a log record for every EMCY frame. |
+
+#### SDO channels (`sniff.sdo.channels[]`)
+
+| Field | Type | Description |
+|---|---|---|
 | `sniff.sdo.channels[]` | list | Optional SDO channels to observe. If omitted, the predefined channel (`0x600 + node_id`, `0x580 + node_id`) is used for all nodes. |
 | `sniff.sdo.channels[].node_id` | int (1-127) | Node ID served by this SDO channel. |
 | `sniff.sdo.channels[].client_to_server_cob_id` | int | Client-to-server standard CAN COB-ID (`0x000..0x7FF`). It does not have to use the conventional CANopen SDO range. |
 | `sniff.sdo.channels[].server_to_client_cob_id` | int | Server-to-client standard CAN COB-ID (`0x000..0x7FF`). Nonstandard assignments are accepted at the operator's responsibility. |
+
+#### Generic raw SDO output (`sniff.sdo.raw`)
+
+| Field | Type | Description |
+|---|---|---|
 | `sniff.sdo.raw.metrics` / `.logs` | bool | Opt in to generic raw SDO telemetry: one `canopen.sdo.transfers` sum point and/or one completed-transfer/abort log carrying the payload as hex. Typed `sniff.sdo.objects[]` output is independent of this setting. |
 | `sniff.sdo.raw.filters[]` | list | Optional allow-list for generic raw SDO emission. A completed transfer/abort is emitted if it matches any entry; no entries emits all observed transfers. Typed `sniff.sdo.objects[]` are matched independently and do not need to be duplicated here. |
 | `sniff.sdo.raw.filters[].node_id` | int (1-127) | Optional node ID selector. |
 | `sniff.sdo.raw.filters[].index` | int | Optional object dictionary index selector. |
 | `sniff.sdo.raw.filters[].sub_index` | int | Optional object dictionary sub-index selector. |
+
+An individual raw filter combines its specified fields with AND; separate
+filters are ORed. For example, `{node_id: 1, index: 0x2001, sub_index: 0}` selects
+only that object on node 1. The receiver correlates standard SDO frames and
+reassembles expedited and segmented upload/download transfers before applying
+these filters and emitting telemetry.
+
+#### Typed SDO objects (`sniff.sdo.objects[]`)
+
+| Field | Type | Description |
+|---|---|---|
 | `sniff.sdo.objects[]` | list | Optional typed object definitions. Matching completed SDO transfers are decoded using the declared datatype and emitted as named metrics/logs. |
 | `sniff.sdo.objects[].node_id` | int (1-127) | Node ID of the object. |
 | `sniff.sdo.objects[].index` / `.sub_index` | int | Object dictionary address. |
@@ -118,11 +139,10 @@ At least one of `metrics.enabled`/`logs.enabled` must be true, and
 | `sniff.sdo.objects[].type` | string | Datatype, using the same types as PDO signals. |
 | `sniff.sdo.objects[].metrics` / `.logs` | bool | Enable metric and/or log emission for the decoded value. |
 
-An individual raw filter combines its specified fields with AND; separate
-filters are ORed. For example, `{node_id: 1, index: 0x2001, sub_index: 0}` selects
-only that object on node 1. The receiver correlates standard SDO frames and
-reassembles expedited and segmented upload/download transfers before applying
-these filters and emitting telemetry.
+#### Raw frame capture (`sniff.raw`)
+
+| Field | Type | Description |
+|---|---|---|
 | `sniff.raw.metrics` / `.logs` | bool | Passively capture frames on `sniff.raw.cob_ids[]` with no protocol decoding. Emits one `canopen.raw.frames` sum point and/or one log per matched frame, carrying the raw hex payload. |
 | `sniff.raw.cob_ids[]` | list of int | Exact 11-bit standard COB-IDs to capture raw. Useful for vendor/proprietary traffic (e.g. a service-tool protocol) that isn't standard CANopen SDO/PDO framing; decoding such payloads is expected to happen downstream, outside this receiver. A COB-ID listed here takes raw-capture precedence over any other sniffing feature that would otherwise handle it. |
 | `sniff.raw.messages[]` | list | Optional declarative decoding of fixed-layout vendor frames on a raw COB-ID, so many vendor protocols don't need a separate downstream processor. A COB-ID referenced by any entry here is automatically raw-captured; you don't also need to list it in `sniff.raw.cob_ids[]`. |
@@ -135,25 +155,13 @@ these filters and emitting telemetry.
 
 If a frame's COB-ID has one or more `sniff.raw.messages[]` entries but none of
 their `match[]` conditions are satisfied, the frame falls back to the
-generic raw-hex capture described above (if `sniff.raw.emit` is set).
+generic raw-hex capture described above (if `sniff.raw.metrics` or
+`sniff.raw.logs` is set).
 
-> **Limitation:** each frame is decoded independently and statelessly —
-> there is no cross-frame reassembly. Vendor commands that spread one
-> logical result across multiple frames (keyed by an app-level sequence
-> byte rather than CiA-301 toggle/segment bits) can each be declared as
-> their own `sniff.raw.messages[]` entry, but they are emitted as
-> separate, uncorrelated signals rather than one merged event. See
-> [documentation.md](./documentation.md) for details.
+#### PDOs (`sniff.pdos[]`)
 
-> **Caveat:** raw capture/decoding takes precedence over `sniff.sdo`. If a
-> vendor protocol reuses a device's real SDO COB-IDs (`0x580/0x600 + node
-> ID`) — as some multiframe service-tool protocols do — declaring that
-> COB-ID under `sniff.raw` disables passive SDO reassembly for *all*
-> traffic on that pair, not just the vendor frames, since the receiver
-> cannot distinguish a genuine CANopen SDO segment from a vendor
-> application-level sequence sharing the same wire. See
-> [documentation.md](./documentation.md) for details.
-
+| Field | Type | Description |
+|---|---|---|
 | `sniff.pdos[]` | list | User-defined PDOs (or any fixed-COB-ID frame) to decode. |
 | `sniff.pdos[].name` | string | Identifies the PDO in logs/errors. |
 | `sniff.pdos[].cob_id` | int | The CAN arbitration ID this PDO is sent on. |
