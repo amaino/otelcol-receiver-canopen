@@ -112,9 +112,10 @@ func (b *MetricsBuilder) Add(p MetricPoint) {
 	}
 	dp.SetTimestamp(pcommon.NewTimestampFromTime(ts))
 	dp.SetDoubleValue(p.Value)
-	for k, v := range p.Attributes {
-		putAttribute(dp.Attributes(), k, v)
-	}
+	// Config validation (see canopenreceiver.validateStaticAttributes)
+	// already guarantees every attribute value is a type pcommon.Map.FromRaw
+	// supports, so no error handling is needed here.
+	_ = dp.Attributes().FromRaw(p.Attributes)
 }
 
 // Empty reports whether no data points have been added since the last Emit.

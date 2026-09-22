@@ -67,9 +67,10 @@ func (b *LogsBuilder) Add(r LogRecord) {
 	lr.SetSeverityNumber(r.Severity)
 	lr.SetSeverityText(r.Severity.String())
 	lr.Body().SetStr(r.Body)
-	for k, v := range r.Attributes {
-		putAttribute(lr.Attributes(), k, v)
-	}
+	// Config validation (see canopenreceiver.validateStaticAttributes)
+	// already guarantees every attribute value is a type pcommon.Map.FromRaw
+	// supports, so no error handling is needed here.
+	_ = lr.Attributes().FromRaw(r.Attributes)
 }
 
 // Empty reports whether no records have been added since the last Emit.
