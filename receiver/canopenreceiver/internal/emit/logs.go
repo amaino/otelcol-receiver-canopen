@@ -68,28 +68,7 @@ func (b *LogsBuilder) Add(r LogRecord) {
 	lr.SetSeverityText(r.Severity.String())
 	lr.Body().SetStr(r.Body)
 	for k, v := range r.Attributes {
-		switch val := v.(type) {
-		case string:
-			lr.Attributes().PutStr(k, val)
-		case int:
-			lr.Attributes().PutInt(k, int64(val))
-		case int64:
-			lr.Attributes().PutInt(k, val)
-		case uint8:
-			lr.Attributes().PutInt(k, int64(val))
-		case uint16:
-			lr.Attributes().PutInt(k, int64(val))
-		case uint32:
-			lr.Attributes().PutInt(k, int64(val))
-		case uint64:
-			lr.Attributes().PutInt(k, int64(val))
-		case float64:
-			lr.Attributes().PutDouble(k, val)
-		case bool:
-			lr.Attributes().PutBool(k, val)
-		default:
-			lr.Attributes().PutStr(k, "")
-		}
+		putAttribute(lr.Attributes(), k, v)
 	}
 }
 

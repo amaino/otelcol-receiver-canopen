@@ -29,7 +29,7 @@ type MetricPoint struct {
 	Unit          string
 	Kind          MetricKind
 	Value         float64
-	Attributes    map[string]string
+	Attributes    map[string]any
 	Timestamp     time.Time
 }
 
@@ -113,7 +113,7 @@ func (b *MetricsBuilder) Add(p MetricPoint) {
 	dp.SetTimestamp(pcommon.NewTimestampFromTime(ts))
 	dp.SetDoubleValue(p.Value)
 	for k, v := range p.Attributes {
-		dp.Attributes().PutStr(k, v)
+		putAttribute(dp.Attributes(), k, v)
 	}
 }
 

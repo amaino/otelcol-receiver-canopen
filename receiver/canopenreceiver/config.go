@@ -9,6 +9,7 @@ package canopenreceiver
 import (
 	"errors"
 	"fmt"
+	"math"
 	"time"
 
 	"go.opentelemetry.io/collector/component"
@@ -72,7 +73,7 @@ type SignalConfig struct {
 	// Attributes are additional static resource/datapoint attributes
 	// attached to every emitted metric data point / log record for this
 	// signal.
-	Attributes map[string]string `mapstructure:"attributes"`
+	Attributes map[string]any `mapstructure:"attributes"`
 }
 
 func (s *SignalConfig) validate(scope string) error {
@@ -95,6 +96,27 @@ func (s *SignalConfig) validate(scope string) error {
 	}
 	if err := s.MetricType.validate(); err != nil {
 		return fmt.Errorf("%s %q: %w", scope, s.Name, err)
+	}
+	if err := validateStaticAttributes(scope+" "+s.Name, s.Attributes); err != nil {
+		return err
+	}
+	return nil
+}
+
+func validateStaticAttributes(scope string, attrs map[string]any) error {
+	for key, value := range attrs {
+		switch value := value.(type) {
+		case string, bool,
+			int, int8, int16, int32, int64,
+			uint, uint8, uint16, uint32,
+			float32, float64:
+		case uint64:
+			if value > math.MaxInt64 {
+				return fmt.Errorf("%s attribute %q: uint64 value %d exceeds supported int64 range", scope, key, value)
+			}
+		default:
+			return fmt.Errorf("%s attribute %q: unsupported static attribute type %T", scope, key, value)
+		}
 	}
 	return nil
 }
