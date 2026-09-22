@@ -57,7 +57,7 @@ func TestLoadConfig(t *testing.T) {
 	assert.Equal(t, "rpm", sig.Unit)
 	assert.True(t, sig.Metrics)
 	assert.Equal(t, "x", sig.Attributes["axis"])
-	assert.Equal(t, 200, sig.Attributes["intervention.type"])
+	assert.Equal(t, 200, sig.Attributes["priority"])
 
 	require.NoError(t, cfg.Validate())
 }

@@ -47,4 +47,4 @@ sniff:
           metric_type: gauge
           attributes:
             axis: x
-            intervention.type: 200
+            priority: 200
