@@ -68,6 +68,10 @@ func buildSnifferConfig(cfg *Config) sniffer.Config {
 		SDOFilters:          make([]sniffer.SDOFilter, 0, len(cfg.Sniff.SDO.Raw.Filters)),
 		SDOObjects:          make([]sniffer.SDOObjectDef, 0, len(cfg.Sniff.SDO.Objects)),
 		SDOChannels:         make([]sniffer.SDOChannel, 0, len(cfg.Sniff.SDO.Channels)),
+		RawEmitMetric:       cfg.Sniff.Raw.Metrics,
+		RawEmitLog:          cfg.Sniff.Raw.Logs,
+		RawCobIDs:           make(map[uint32]struct{}, len(cfg.Sniff.Raw.CobIDs)),
+		RawMessages:         make(map[uint32][]sniffer.RawMessageDef),
 	}
 	if !cfg.Sniff.Enabled {
 		return sc
@@ -93,6 +97,32 @@ func buildSnifferConfig(cfg *Config) sniffer.Config {
 			EmitMetric: object.Metrics, EmitLog: object.Logs,
 			MetricSum: object.MetricType == MetricSum, Attributes: object.Attributes,
 		})
+	}
+	for _, id := range cfg.Sniff.Raw.CobIDs {
+		sc.RawCobIDs[id] = struct{}{}
+	}
+	for _, msg := range cfg.Sniff.Raw.Messages {
+		def := sniffer.RawMessageDef{Name: msg.Name}
+		for _, m := range msg.Match {
+			def.Match = append(def.Match, sniffer.RawMatch{ByteOffset: m.ByteOffset, Value: m.Value})
+		}
+		for _, sig := range msg.Signals {
+			def.Signals = append(def.Signals, sniffer.PDOSignal{
+				Name:       sig.Name,
+				BitOffset:  sig.BitOffset,
+				Type:       sig.Type,
+				ByteLen:    sig.ByteLen,
+				Scale:      sig.Scale,
+				Offset:     sig.Offset,
+				Unit:       sig.Unit,
+				EmitMetric: sig.Metrics,
+				EmitLog:    sig.Logs,
+				MetricSum:  sig.MetricType == MetricSum,
+				Attributes: sig.Attributes,
+			})
+		}
+		sc.RawMessages[msg.CobID] = append(sc.RawMessages[msg.CobID], def)
+		sc.RawCobIDs[msg.CobID] = struct{}{}
 	}
 	for _, pdo := range cfg.Sniff.PDOs {
 		def := sniffer.PDODef{Name: pdo.Name, CobID: pdo.CobID}

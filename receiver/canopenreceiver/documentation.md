@@ -48,6 +48,82 @@ event is attributable to a specific node.
   sub-index. The specified fields within one filter are combined with AND;
   multiple filter entries are alternatives, combined with OR.
 
+### `canopen.raw.frames`
+
+- **Type**: non-monotonic cumulative sum; one point with value `1` per
+  captured raw frame.
+- **Enabled by**: `sniff.raw.metrics: true`, for a COB-ID listed in
+  `sniff.raw.cob_ids`.
+- **Attributes (resource)**: `canopen.interface`, `canopen.cob_id`.
+- **Attributes (point)**: `canopen.raw.data` (uppercase hexadecimal payload).
+- No protocol decoding is performed. This exists to capture non-CANopen or
+  vendor-proprietary traffic sharing the bus (e.g. a service-tool protocol)
+  so it can be decoded by a separate, downstream component.
+
+### Declarative raw message decoding (`sniff.raw.messages[]`)
+
+- For fixed-layout vendor frames, `sniff.raw.messages[]` decodes named
+  signals directly (same signal semantics as `sniff.pdos[].signals[]`:
+  type, bit offset, scale/offset, unit, `emit`, `metric_type`,
+  `attributes`) instead of emitting opaque raw hex, so a bespoke downstream
+  processor is often unnecessary.
+- Each message may declare `match[]` byte-equality conditions (ANDed) to
+  discriminate its shape from other messages sharing the same COB-ID, such
+  as a vendor command word echoed at the start of the payload. A message
+  with no `match[]` matches every frame on its `cob_id`.
+- Decoded signals are emitted as metrics/logs under their own configured
+  name, following the same emission rules as PDO signals — not as
+  `canopen.raw.frames` / raw hex.
+- If a frame's COB-ID has declared messages but none of them match, the
+  frame falls back to the generic raw-hex capture (`canopen.raw.frames` /
+  raw-frame log) described above, when `sniff.raw.emit` is set.
+- Declaring a message automatically enables raw capture on its `cob_id`;
+  it does not need to also appear in `sniff.raw.cob_ids[]`.
+
+#### Limitation: no cross-frame reassembly for vendor multi-sequence commands
+
+`sniff.raw.messages[]` decodes each frame **independently and statelessly**
+— nothing is buffered or correlated across frames. This is sufficient for
+vendor commands that fit in a single 8-byte frame (e.g. TRUCKCOM's
+`0x8008`, `0x80FA`, `0x8037`, `0x8046`), but **not** for commands like
+DHU/TRUCKCOM's `0x800E` (`tcReadPartNo`), which spread one logical result
+across up to 8 separate frames distinguished only by an application-level
+sequence byte (`Data[2]`), with no CiA-301 toggle/last-segment framing to
+key off of.
+
+You can still declare one `sniff.raw.messages[]` entry per sequence number
+(matching `byte_offset`/`value` on the sequence byte) to decode each
+sequence's fields as independent signals — e.g. sequence 3 yields the
+firmware part number, sequence 4 yields its extension — but these are
+emitted as **separate, uncorrelated** telemetry points, not merged into
+one combined event. Reconstructing a single logical record from multiple
+vendor sequences would require stateful, protocol-specific reassembly
+(tracking partial sequences per node/COB-ID, deciding when a set is
+"complete", handling out-of-order or missing sequences) that intentionally
+does not belong in this generic, protocol-agnostic mechanism. If you need
+that, implement it in a separate downstream component (e.g. a processor
+that correlates the independently-emitted per-sequence signals), keeping
+this receiver's raw-message decoding purely declarative and stateless.
+
+#### Caveat: COB-IDs shared between raw capture and real SDO transfers
+
+Some vendor protocols reuse a device's genuine standard SDO COB-IDs
+(`0x580 + node ID` / `0x600 + node ID`) to carry a private, non-CiA-301
+application protocol — for example a service-tool command word echoed in
+bytes 0-1, sometimes itself spanning multiple frames correlated by an
+application-defined sequence number rather than CiA-301's toggle/segment
+bits. `HandleFrame` checks `sniff.raw.cob_ids`/`sniff.raw.messages` *before*
+routing a frame to the SDO observer, so any COB-ID listed there is fully
+diverted to raw handling and never reaches `sniff.sdo`. This is
+intentional and safe, but it means: **enabling raw capture/decoding on a
+COB-ID that is also a real SDO pair disables passive SDO reassembly for
+*all* traffic on that pair**, not just the vendor frames — the receiver
+cannot distinguish a genuine CANopen SDO segment from a vendor multiframe
+sequence sharing the same wire. If you need both, only declare
+`sniff.raw` for COB-IDs that are exclusively used by the vendor protocol;
+where a COB-ID is genuinely shared, this receiver cannot safely observe
+both protocols on it simultaneously.
+
 ## Logs
 
 ### Heartbeat / NMT state changes
@@ -92,6 +168,15 @@ For example, an object definition for `0x20F0:11` can turn the raw payload
 into a firmware-version metric or log value. SDO filters select which
 transfers are observed; typed object definitions provide the datatype and
 output name for matching objects.
+
+### Raw frame capture
+
+- **Enabled by**: `sniff.raw.metrics` / `sniff.raw.logs`, for a COB-ID listed
+  in `sniff.raw.cob_ids`.
+- **Emitted**: once per matched frame, with no protocol interpretation.
+- **Severity**: Info
+- **Attributes**: `canopen.cob_id` (hex string), `canopen.raw.data`
+  (uppercase hexadecimal payload).
 
 ### User-configured PDO signal logs
 
