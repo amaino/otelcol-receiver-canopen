@@ -15,8 +15,10 @@ frames, EMCY (emergency) messages, heartbeat/NMT state changes, and SDO
 traffic exchanged by other nodes as it appears on the bus, fully driven by
 declarative configuration. Active SDO polling is planned as a follow-up.
 
-Every signal you configure from a PDO can be emitted as a metric, a log, or
-both.
+Every field you configure from a PDO, a raw message, an SDO object, or a raw
+transaction's response can be emitted as a metric, a log, or both. Declaring
+several fields against one payload decodes a struct (e.g. a multi-field
+CANopen record) - one field per member.
 
 This receiver is a standard `receiver.Factory` component and composes with
 any other Collector processor/exporter/extension exactly like any other
@@ -36,14 +38,13 @@ receivers:
       flush_interval: 10s
     logs:
       enabled: true
-    sniff:
-      enabled: true
-      heartbeat:
-        logs: true
-      emcy:
-        metrics: true
-        logs: true
-      sdo:
+    heartbeat:
+      logs: true
+    emcy:
+      metrics: true
+      logs: true
+    sdo:
+      sniff:
         channels:
           - node_id: 1
             client_to_server_cob_id: 0x601
@@ -51,27 +52,29 @@ receivers:
           - node_id: 1
             client_to_server_cob_id: 0x611
             server_to_client_cob_id: 0x591
-        raw:
-          metrics: true
-          logs: true
-          filters:
-            - node_id: 1
-              index: 0x2001
-              sub_index: 0x00
-      pdos:
-        - name: motor_tpdo1
-          cob_id: 0x181
-          signals:
-            - name: canopen.motor.speed
-              bit_offset: 0
-              type: int16
-              scale: 0.1
-              unit: rpm
-              metrics: true
-              metric_type: gauge
-              attributes:
-                axis: x
-      raw:
+        objects:
+          - node_id: 1
+            index: 0x2001
+            sub_index: 0x00
+            fields:
+              - name: canopen.example.value
+                type: uint8
+                logs: true
+    pdo:
+      - name: motor_tpdo1
+        cob_id: 0x181
+        fields:
+          - name: canopen.motor.speed
+            bit_offset: 0
+            type: int16
+            scale: 0.1
+            unit: rpm
+            metrics: true
+            metric_type: gauge
+            attributes:
+              axis: x
+    raw:
+      sniff:
         metrics: true
         logs: true
         cob_ids:
@@ -89,100 +92,158 @@ receivers:
 | `metrics.enabled` | bool | `true` | Enables the metrics signal. |
 | `metrics.flush_interval` | duration | `10s` | How often accumulated metric data points are flushed to the pipeline. |
 | `logs.enabled` | bool | `true` | Enables the logs signal. |
-| `sniff.*` | | | See below. |
+| `heartbeat.*` / `emcy.*` / `sdo.*` / `pdo[]` / `raw.*` | | | See below. |
 
-At least one of `metrics.enabled`/`logs.enabled` must be true, and
-`sniff.enabled` must be true. Any event or signal that requests `metrics: true` requires
-`metrics.enabled: true` (likewise for `logs`); this is validated at startup.
+At least one of `metrics.enabled`/`logs.enabled` must be true. Each of
+`heartbeat`/`emcy`/`sdo`/`pdo`/`raw` is independently optional - an unset
+section simply emits nothing. Any field that requests
+`metrics: true` requires `metrics.enabled: true` (likewise for `logs`);
+this is validated at startup.
 
-### Sniffing (`sniff`)
-
-| Field | Type | Description |
-|---|---|---|
-| `sniff.enabled` | bool | Enables passive sniffing. |
-| `sniff.heartbeat.metrics` / `.logs` | bool | Enable the `canopen.node.nmt_state` gauge and/or a log record only when a node's NMT state changes. |
-| `sniff.emcy.metrics` / `.logs` | bool | Enable the `canopen.node.emcy_error_register` gauge and/or a log record for every EMCY frame. |
-
-#### SDO channels (`sniff.sdo.channels[]`)
+### Heartbeat and EMCY
 
 | Field | Type | Description |
 |---|---|---|
-| `sniff.sdo.channels[]` | list | Optional SDO channels to observe. If omitted, the predefined channel (`0x600 + node_id`, `0x580 + node_id`) is used for all nodes. |
-| `sniff.sdo.channels[].node_id` | int (1-127) | Node ID served by this SDO channel. |
-| `sniff.sdo.channels[].client_to_server_cob_id` | int | Client-to-server standard CAN COB-ID (`0x000..0x7FF`). It does not have to use the conventional CANopen SDO range. |
-| `sniff.sdo.channels[].server_to_client_cob_id` | int | Server-to-client standard CAN COB-ID (`0x000..0x7FF`). Nonstandard assignments are accepted at the operator's responsibility. |
+| `heartbeat.metrics` / `.logs` | bool | Enable the `canopen.node.nmt_state` gauge and/or a log record only when a node's NMT state changes. |
+| `emcy.metrics` / `.logs` | bool | Enable the `canopen.node.emcy_error_register` gauge and/or a log record for every EMCY frame. |
 
-#### Generic raw SDO output (`sniff.sdo.raw`)
+### SDO (`sdo`)
 
-| Field | Type | Description |
-|---|---|---|
-| `sniff.sdo.raw.metrics` / `.logs` | bool | Opt in to generic raw SDO telemetry: one `canopen.sdo.transfers` sum point and/or one completed-transfer/abort log carrying the payload as hex. Typed `sniff.sdo.objects[]` output is independent of this setting. |
-| `sniff.sdo.raw.filters[]` | list | Optional allow-list for generic raw SDO emission. A completed transfer/abort is emitted if it matches any entry; no entries emits all observed transfers. Typed `sniff.sdo.objects[]` are matched independently and do not need to be duplicated here. |
-| `sniff.sdo.raw.filters[].node_id` | int (1-127) | Optional node ID selector. |
-| `sniff.sdo.raw.filters[].index` | int | Optional object dictionary index selector. |
-| `sniff.sdo.raw.filters[].sub_index` | int | Optional object dictionary sub-index selector. |
+Standard CANopen SDO config is split into `sdo.sniff` (passive observation,
+implemented today) and `sdo.poll` (active polling - **config/validation
+only, not implemented yet**; see [Active polling](#active-polling-not-yet-implemented)).
 
-An individual raw filter combines its specified fields with AND; separate
-filters are ORed. For example, `{node_id: 1, index: 0x2001, sub_index: 0}` selects
-only that object on node 1. The receiver correlates standard SDO frames and
-reassembles expedited and segmented upload/download transfers before applying
-these filters and emitting telemetry.
-
-#### Typed SDO objects (`sniff.sdo.objects[]`)
+#### SDO channels (`sdo.sniff.channels[]`)
 
 | Field | Type | Description |
 |---|---|---|
-| `sniff.sdo.objects[]` | list | Optional typed object definitions. Matching completed SDO transfers are decoded using the declared datatype and emitted as named metrics/logs. |
-| `sniff.sdo.objects[].node_id` | int (1-127) | Node ID of the object. |
-| `sniff.sdo.objects[].index` / `.sub_index` | int | Object dictionary address. |
-| `sniff.sdo.objects[].name` | string | Metric name and log signal name. |
-| `sniff.sdo.objects[].type` | string | Datatype, using the same types as PDO signals. |
-| `sniff.sdo.objects[].metrics` / `.logs` | bool | Enable metric and/or log emission for the decoded value. |
+| `sdo.sniff.channels[]` | list | Optional SDO channels to observe. If omitted, the predefined channel (`0x600 + node_id`, `0x580 + node_id`) is used for all nodes. |
+| `sdo.sniff.channels[].node_id` | int (1-127) | Node ID served by this SDO channel. |
+| `sdo.sniff.channels[].client_to_server_cob_id` | int | Client-to-server standard CAN COB-ID (`0x000..0x7FF`). It does not have to use the conventional CANopen SDO range. |
+| `sdo.sniff.channels[].server_to_client_cob_id` | int | Server-to-client standard CAN COB-ID (`0x000..0x7FF`). Nonstandard assignments are accepted at the operator's responsibility. |
 
-#### Raw frame capture (`sniff.raw`)
+#### Generic raw SDO output
+
+There is no generic undecoded fallback for standard SDO transfers - unlike
+`raw` (below), where non-CANopen frames genuinely can't be declared in
+advance, any SDO object's structure (including a multi-field struct) can
+always be declared precisely via `sdo.sniff.objects[]`/`sdo.poll.objects[]`,
+so there's nothing a hex catch-all would add.
+
+#### Typed SDO objects (`sdo.sniff.objects[]`)
 
 | Field | Type | Description |
 |---|---|---|
-| `sniff.raw.metrics` / `.logs` | bool | Passively capture frames on `sniff.raw.cob_ids[]` with no protocol decoding. Emits one `canopen.raw.frames` sum point and/or one log per matched frame, carrying the raw hex payload. |
-| `sniff.raw.cob_ids[]` | list of int | Exact 11-bit standard COB-IDs to capture raw. Useful for vendor/proprietary traffic (e.g. a service-tool protocol) that isn't standard CANopen SDO/PDO framing; decoding such payloads is expected to happen downstream, outside this receiver. A COB-ID listed here takes raw-capture precedence over any other sniffing feature that would otherwise handle it. |
-| `sniff.raw.messages[]` | list | Optional declarative decoding of fixed-layout vendor frames on a raw COB-ID, so many vendor protocols don't need a separate downstream processor. A COB-ID referenced by any entry here is automatically raw-captured; you don't also need to list it in `sniff.raw.cob_ids[]`. |
-| `sniff.raw.messages[].name` | string | Identifies the message in logs/errors. |
-| `sniff.raw.messages[].cob_id` | int | The CAN arbitration ID this message is sent on. |
-| `sniff.raw.messages[].match[]` | list | Optional byte-equality conditions used to discriminate this message shape from others sharing the same COB-ID (e.g. a vendor command word echoed in the first bytes of the payload). All entries are ANDed. If omitted, the message matches every frame on `cob_id`. |
-| `sniff.raw.messages[].match[].byte_offset` | int (0-7) | Zero-based byte offset into the frame payload to compare. |
-| `sniff.raw.messages[].match[].value` | int (0-255) | Expected byte value at `byte_offset`. |
-| `sniff.raw.messages[].signals[]` | list | Signals to decode from this message's payload when it matches; see [Signal fields](#signal-fields). Decoded signals are emitted under their own configured name/metric-or-log settings, not as `canopen.raw.frames`. |
+| `sdo.sniff.objects[]` | list | Optional typed object definitions. Matching completed SDO transfers are decoded using the declared fields and emitted as named metrics/logs. |
+| `sdo.sniff.objects[].node_id` | int (1-127) | Node ID of the object. |
+| `sdo.sniff.objects[].index` / `.sub_index` | int | Object dictionary address. |
+| `sdo.sniff.objects[].fields[]` | list | One or more fields to decode from the completed transfer's payload; see [Field reference](#field-reference). Multiple entries decode a struct from one object. |
 
-If a frame's COB-ID has one or more `sniff.raw.messages[]` entries but none of
+#### Active SDO polling (`sdo.poll`) - not yet implemented
+
+| Field | Type | Description |
+|---|---|---|
+| `sdo.poll.interval` | duration | Required if `sdo.poll.objects[]` is non-empty. |
+| `sdo.poll.objects[]` | list | Same shape as `sdo.sniff.objects[]` (node_id/index/sub_index + fields[]). |
+
+Declaring `sdo.poll` entries is validated at startup but has no runtime
+effect today - the receiver does not yet initiate SDO transfers. See
+[Active polling](#active-polling-not-yet-implemented).
+
+### Raw (non-CANopen / vendor) traffic (`raw`)
+
+Vendor/proprietary CAN traffic (e.g. a service-tool protocol) is split into
+`raw.sniff` (passive capture, implemented today) and `raw.transactions`
+(active request/response polling - **config/validation only, not
+implemented yet**; see [Active polling](#active-polling-not-yet-implemented)).
+
+#### Raw frame capture (`raw.sniff`)
+
+| Field | Type | Description |
+|---|---|---|
+| `raw.sniff.metrics` / `.logs` | bool | Passively capture frames on `raw.sniff.cob_ids[]` with no protocol decoding. Emits one `canopen.raw.frames` sum point and/or one log per matched frame, carrying the raw hex payload. |
+| `raw.sniff.cob_ids[]` | list of int | Exact 11-bit standard COB-IDs to capture raw. Useful for vendor/proprietary traffic (e.g. a service-tool protocol) that isn't standard CANopen SDO/PDO framing; decoding such payloads is expected to happen downstream, outside this receiver. A COB-ID listed here takes raw-capture precedence over any other sniffing feature that would otherwise handle it. |
+| `raw.sniff.messages[]` | list | Optional declarative decoding of fixed-layout vendor frames on a raw COB-ID, so many vendor protocols don't need a separate downstream processor. A COB-ID referenced by any entry here is automatically raw-captured; you don't also need to list it in `raw.sniff.cob_ids[]`. |
+| `raw.sniff.messages[].name` | string | Identifies the message in logs/errors. |
+| `raw.sniff.messages[].cob_id` | int | The CAN arbitration ID this message is sent on. |
+| `raw.sniff.messages[].match[]` | list | Optional byte-equality conditions used to discriminate this message shape from others sharing the same COB-ID (e.g. a vendor command word echoed in the first bytes of the payload). All entries are ANDed. If omitted, the message matches every frame on `cob_id`. |
+| `raw.sniff.messages[].match[].byte_offset` | int (0-7) | Zero-based byte offset into the frame payload to compare. |
+| `raw.sniff.messages[].match[].value` | int (0-255) | Expected byte value at `byte_offset`. |
+| `raw.sniff.messages[].fields[]` | list | Fields to decode from this message's payload when it matches; see [Field reference](#field-reference). Multiple entries decode a struct from one frame. Decoded fields are emitted under their own configured name/metric-or-log settings, not as `canopen.raw.frames`. |
+
+If a frame's COB-ID has one or more `raw.sniff.messages[]` entries but none of
 their `match[]` conditions are satisfied, the frame falls back to the
-generic raw-hex capture described above (if `sniff.raw.metrics` or
-`sniff.raw.logs` is set).
+generic raw-hex capture described above (if `raw.sniff.metrics` or
+`raw.sniff.logs` is set).
 
-#### PDOs (`sniff.pdos[]`)
+#### Active raw requests (`raw.transactions`) - not yet implemented
 
-| Field | Type | Description |
-|---|---|---|
-| `sniff.pdos[]` | list | User-defined PDOs (or any fixed-COB-ID frame) to decode. |
-| `sniff.pdos[].name` | string | Identifies the PDO in logs/errors. |
-| `sniff.pdos[].cob_id` | int | The CAN arbitration ID this PDO is sent on. |
-| `sniff.pdos[].signals[]` | list | Signals to decode from this PDO's payload; see [Signal fields](#signal-fields). |
-
-### Signal fields
-
-Used by `sniff.pdos[].signals[]`:
+Each entry is a request/response poll cycle, not a fixed-rate blind
+retransmit: send the request, wait for the correlated reply (or `timeout`),
+then wait `interval` before sending the next request.
 
 | Field | Type | Description |
 |---|---|---|
-| `name` | string | Metric name, or the `canopen.signal.name` value on log records. |
+| `raw.transactions[].name` | string | Identifies the request/response transaction in logs/errors. |
+| `raw.transactions[].cob_id` | int | Where the fixed request frame would be transmitted. |
+| `raw.transactions[].payload` | list of int (1-8 bytes) | The fixed request frame's payload. |
+| `raw.transactions[].timeout` | duration | Required; how long to wait for the correlated response before giving up on that poll cycle. |
+| `raw.transactions[].interval` | duration | Required; how long to wait after a response (or timeout) before sending the next request. |
+| `raw.transactions[].response.cob_id` | int | Where the correlated reply would be expected. |
+| `raw.transactions[].response.fields[]` | list | Same shape as `raw.sniff.messages[].fields[]`. |
+
+Declaring `raw.transactions` entries is validated at startup but has no
+runtime effect today - nothing transmits the request or correlates a reply
+to it. See [Active polling](#active-polling-not-yet-implemented).
+
+### PDOs (`pdo[]`)
+
+| Field | Type | Description |
+|---|---|---|
+| `pdo[]` | list | User-defined PDOs (or any fixed-COB-ID frame) to decode. |
+| `pdo[].name` | string | Identifies the PDO in logs/errors. |
+| `pdo[].cob_id` | int | The CAN arbitration ID this PDO is sent on. |
+| `pdo[].fields[]` | list | Fields to decode from this PDO's payload; see [Field reference](#field-reference). Multiple entries decode a struct from one frame. |
+
+### Active polling - not yet implemented
+
+`sdo.poll` and `raw.transactions` describe intended future active-request
+behavior (issuing an SDO upload, or transmitting a fixed vendor request
+frame, on an interval) and are fully validated at startup, but nothing in
+this receiver transmits or correlates a reply yet - that's a later commit.
+Configuring them today has no runtime effect beyond passing validation.
+
+### Field reference
+
+Used by `pdo[].fields[]`, `sdo.sniff.objects[].fields[]`,
+`sdo.poll.objects[].fields[]`, `raw.sniff.messages[].fields[]`, and
+`raw.transactions[].response.fields[]`:
+
+| Field | Type | Description |
+|---|---|---|
+| `name` | string | Metric name (metric emission), and the key this field's value is stored under in the structured log body map (log emission). |
 | `bit_offset` | int | 0-based, LSB-first bit offset into the payload. |
 | `type` | string | One of `bool`, `int8`, `int16`, `int32`, `int64`, `uint8`, `uint16`, `uint32`, `uint64`, `float32`, `float64`, `bytes`, `visible_string`. |
 | `byte_len` | int | Required for `bytes`/`visible_string`; ignored otherwise. |
-| `scale` / `offset` | float | Linear transform applied as `value*scale + offset` (scale defaults to 1). |
+| `scale` / `offset` | float | Linear transform applied as `value*scale + offset` (scale defaults to 1). Not applicable to `bytes`/`visible_string`. |
 | `unit` | string | Attached to the emitted metric. |
-| `metrics` | bool | Emit this signal as a metric. Requires top-level `metrics.enabled: true`. |
-| `logs` | bool | Emit this signal as a log record. Requires top-level `logs.enabled: true`. |
+| `metrics` | bool | Emit this field as a metric. Requires top-level `metrics.enabled: true`. Not supported for `bytes`/`visible_string` (metrics can't represent them) - use `logs` instead. |
+| `logs` | bool | Include this field's value in the group's structured log body map. Requires top-level `logs.enabled: true`. |
 | `metric_type` | `gauge`\|`sum` | Metric point type when emitting metrics (default `gauge`). |
-| `attributes` | map[string]string | Extra static attributes attached to every emitted data point/log record. |
+| `attributes` | map[string]string | Extra static attributes attached to every emitted data point/log record for this field. Log-side attributes from every field in the same group are merged into one record's `Attributes` (metadata) - not the body. |
+
+### Log record shape
+
+Fields with `logs: true` from the same group (one PDO frame, one raw
+message, one completed SDO transfer, or one raw transaction's response) are
+combined into a **single** structured log record, not one record per field
+- matching how the wider OTel Collector ecosystem represents parsed
+structured data. The record's `Body` is a map keyed by each field's `name`
+(hex string for `bytes`, the string itself for `visible_string`, the
+scaled numeric value otherwise); `Attributes` carries only metadata about
+the record (e.g. `canopen.pdo.name`, `canopen.sdo.index`/`.subindex`,
+`canopen.raw.message`) plus each field's static `attributes:`, never the
+decoded values themselves.
 
 ## Emitted telemetry
 
@@ -192,17 +253,18 @@ errors), and their attributes.
 
 ## Roadmap
 
-Active SDO polling (periodic reads of object dictionary entries from one or
-more nodes) is planned as a follow-up to this commit; the `sdo` config
-section will be added at that point. See the top-level
-[README.md](/README.md) for the overall plan.
+Active SDO polling and active raw requests (periodic reads of object
+dictionary entries or request/response poll cycles) are planned as
+a follow-up; `sdo.poll` and `raw.transactions` already describe their
+intended config shape (see above) but have no runtime effect yet.
 
 ## Limitations (current)
 
 - Linux SocketCAN only; other platforms fail fast at startup with a clear
   error (all other logic remains testable everywhere).
 - Classic CAN frames only (no CAN FD).
-- Sniffing (passive decode) only — no active SDO requests yet.
+- Sniffing (passive decode) only — `sdo.poll`/`raw.transactions` are
+  config/validation-only; no active SDO or raw requests are sent yet.
 - No EDS/DCF parsing; signals are declared explicitly in YAML.
 - No traces signal.
 

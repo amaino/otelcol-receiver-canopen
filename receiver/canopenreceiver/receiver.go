@@ -59,92 +59,70 @@ func buildSnifferConfig(cfg *Config) sniffer.Config {
 	sc := sniffer.Config{
 		InterfaceName:       cfg.Interface,
 		PDOs:                make(map[uint32]sniffer.PDODef),
-		HeartbeatEmitMetric: cfg.Sniff.Heartbeat.Metrics,
-		HeartbeatEmitLog:    cfg.Sniff.Heartbeat.Logs,
-		EMCYEmitMetric:      cfg.Sniff.EMCY.Metrics,
-		EMCYEmitLog:         cfg.Sniff.EMCY.Logs,
-		SDOEmitMetric:       cfg.Sniff.SDO.Raw.Metrics,
-		SDOEmitLog:          cfg.Sniff.SDO.Raw.Logs,
-		SDOFilters:          make([]sniffer.SDOFilter, 0, len(cfg.Sniff.SDO.Raw.Filters)),
-		SDOObjects:          make([]sniffer.SDOObjectDef, 0, len(cfg.Sniff.SDO.Objects)),
-		SDOChannels:         make([]sniffer.SDOChannel, 0, len(cfg.Sniff.SDO.Channels)),
-		RawEmitMetric:       cfg.Sniff.Raw.Metrics,
-		RawEmitLog:          cfg.Sniff.Raw.Logs,
-		RawCobIDs:           make(map[uint32]struct{}, len(cfg.Sniff.Raw.CobIDs)),
+		HeartbeatEmitMetric: cfg.Heartbeat.Metrics,
+		HeartbeatEmitLog:    cfg.Heartbeat.Logs,
+		EMCYEmitMetric:      cfg.EMCY.Metrics,
+		EMCYEmitLog:         cfg.EMCY.Logs,
+		SDOObjects:          make([]sniffer.SDOObjectDef, 0, len(cfg.SDO.Sniff.Objects)),
+		SDOChannels:         make([]sniffer.SDOChannel, 0, len(cfg.SDO.Sniff.Channels)),
+		RawEmitMetric:       cfg.Raw.Sniff.Metrics,
+		RawEmitLog:          cfg.Raw.Sniff.Logs,
+		RawCobIDs:           make(map[uint32]struct{}, len(cfg.Raw.Sniff.CobIDs)),
 		RawMessages:         make(map[uint32][]sniffer.RawMessageDef),
 	}
-	if !cfg.Sniff.Enabled {
-		return sc
-	}
-	for _, filter := range cfg.Sniff.SDO.Raw.Filters {
-		sc.SDOFilters = append(sc.SDOFilters, sniffer.SDOFilter{
-			NodeID:   filter.NodeID,
-			Index:    filter.Index,
-			SubIndex: filter.SubIndex,
-		})
-	}
-	for _, channel := range cfg.Sniff.SDO.Channels {
+	for _, channel := range cfg.SDO.Sniff.Channels {
 		sc.SDOChannels = append(sc.SDOChannels, sniffer.SDOChannel{
 			NodeID: channel.NodeID, ClientToServerCobID: channel.ClientToServerCobID,
 			ServerToClientCobID: channel.ServerToClientCobID,
 		})
 	}
-	for _, object := range cfg.Sniff.SDO.Objects {
+	for _, object := range cfg.SDO.Sniff.Objects {
 		sc.SDOObjects = append(sc.SDOObjects, sniffer.SDOObjectDef{
 			NodeID: object.NodeID, Index: object.Index, SubIndex: object.SubIndex,
-			Name: object.Name, Type: object.Type, ByteLen: object.ByteLen,
-			Scale: object.Scale, Offset: object.Offset, Unit: object.Unit,
-			EmitMetric: object.Metrics, EmitLog: object.Logs,
-			MetricSum: object.MetricType == MetricSum, Attributes: object.Attributes,
+			Fields: buildSnifferFields(object.Fields),
 		})
 	}
-	for _, id := range cfg.Sniff.Raw.CobIDs {
+	for _, id := range cfg.Raw.Sniff.CobIDs {
 		sc.RawCobIDs[id] = struct{}{}
 	}
-	for _, msg := range cfg.Sniff.Raw.Messages {
-		def := sniffer.RawMessageDef{Name: msg.Name}
+	for _, msg := range cfg.Raw.Sniff.Messages {
+		def := sniffer.RawMessageDef{Name: msg.Name, Fields: buildSnifferFields(msg.Fields)}
 		for _, m := range msg.Match {
 			def.Match = append(def.Match, sniffer.RawMatch{ByteOffset: m.ByteOffset, Value: m.Value})
-		}
-		for _, sig := range msg.Signals {
-			def.Signals = append(def.Signals, sniffer.PDOSignal{
-				Name:       sig.Name,
-				BitOffset:  sig.BitOffset,
-				Type:       sig.Type,
-				ByteLen:    sig.ByteLen,
-				Scale:      sig.Scale,
-				Offset:     sig.Offset,
-				Unit:       sig.Unit,
-				EmitMetric: sig.Metrics,
-				EmitLog:    sig.Logs,
-				MetricSum:  sig.MetricType == MetricSum,
-				Attributes: sig.Attributes,
-			})
 		}
 		sc.RawMessages[msg.CobID] = append(sc.RawMessages[msg.CobID], def)
 		sc.RawCobIDs[msg.CobID] = struct{}{}
 	}
-	for _, pdo := range cfg.Sniff.PDOs {
-		def := sniffer.PDODef{Name: pdo.Name, CobID: pdo.CobID}
-		for _, sig := range pdo.Signals {
-			def.Signals = append(def.Signals, sniffer.PDOSignal{
-				Name:       sig.Name,
-				BitOffset:  sig.BitOffset,
-				Type:       sig.Type,
-				ByteLen:    sig.ByteLen,
-				Scale:      sig.Scale,
-				Offset:     sig.Offset,
-				Unit:       sig.Unit,
-				EmitMetric: sig.Metrics,
-				EmitLog:    sig.Logs,
-				MetricSum:  sig.MetricType == MetricSum,
-				Attributes: sig.Attributes,
-			})
-		}
-		sc.PDOs[pdo.CobID] = def
+	// cfg.SDO.Poll and cfg.Raw.Transactions are intentionally not read here:
+	// active polling/requests are not implemented yet.
+	for _, pdo := range cfg.PDO {
+		sc.PDOs[pdo.CobID] = sniffer.PDODef{Name: pdo.Name, CobID: pdo.CobID, Fields: buildSnifferFields(pdo.Fields)}
 	}
 	return sc
 }
+
+// buildSnifferFields converts a list of FieldConfig into the sniffer
+// package's independent Field type.
+func buildSnifferFields(fields []FieldConfig) []sniffer.Field {
+	out := make([]sniffer.Field, 0, len(fields))
+	for _, field := range fields {
+		out = append(out, sniffer.Field{
+			Name:       field.Name,
+			BitOffset:  field.BitOffset,
+			Type:       field.Type,
+			ByteLen:    field.ByteLen,
+			Scale:      field.Scale,
+			Offset:     field.Offset,
+			Unit:       field.Unit,
+			EmitMetric: field.Metrics,
+			EmitLog:    field.Logs,
+			MetricSum:  field.MetricType == MetricSum,
+			Attributes: field.Attributes,
+		})
+	}
+	return out
+}
+
 
 func (r *canopenReceiver) Start(ctx context.Context, _ component.Host) error {
 	r.startOnce.Do(func() {
