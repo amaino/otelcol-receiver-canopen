@@ -19,7 +19,7 @@ func TestSniffer_PDO(t *testing.T) {
 			0x181: {
 				Name:  "motor_tpdo1",
 				CobID: 0x181,
-				Signals: []PDOSignal{
+				Fields: []Field{
 					{
 						Name:       "canopen.motor.speed",
 						BitOffset:  0,
@@ -51,8 +51,10 @@ func TestSniffer_PDO(t *testing.T) {
 
 	ld := logs.Emit()
 	lr := ld.ResourceLogs().At(0).ScopeLogs().At(0).LogRecords().At(0)
+	assert.Equal(t, "motor_tpdo1", lr.Attributes().AsRaw()["canopen.pdo.name"])
 	assert.Equal(t, "x", lr.Attributes().AsRaw()["axis"])
 	assert.Equal(t, int64(200), lr.Attributes().AsRaw()["priority"])
+	assert.InDelta(t, 100.0, lr.Body().Double(), 0.001)
 }
 
 func TestSniffer_Heartbeat_StateChangeLogging(t *testing.T) {
@@ -89,8 +91,16 @@ func TestSniffer_EMCY(t *testing.T) {
 	assert.Contains(t, lr.Body().Str(), "0x2310")
 }
 
-func TestSniffer_SDORequestAndAbort(t *testing.T) {
-	s := New(Config{InterfaceName: "can0", SDOEmitLog: true, SDOEmitMetric: true})
+func TestSniffer_SDOAbortProducesNoEmission(t *testing.T) {
+	// Aborts carry no data to decode, and there is no generic undecoded
+	// fallback - only explicitly declared SDOObjects are ever emitted.
+	s := New(Config{
+		InterfaceName: "can0",
+		SDOObjects: []SDOObjectDef{{
+			NodeID: 1, Index: 0x2001, SubIndex: 0x00,
+			Fields: []Field{{Name: "canopen.test.value", Type: codec.Uint8, EmitLog: true}},
+		}},
+	})
 	metrics := emit.NewMetricsBuilder()
 	logs := emit.NewLogsBuilder()
 
@@ -107,44 +117,41 @@ func TestSniffer_SDORequestAndAbort(t *testing.T) {
 		logs,
 	)
 
-	require.False(t, metrics.Empty())
-	require.False(t, logs.Empty())
-	md := metrics.Emit()
-	metric := md.ResourceMetrics().At(0).ScopeMetrics().At(0).Metrics().At(0)
-	assert.Equal(t, "canopen.sdo.transfers", metric.Name())
-	assert.Equal(t, 1, metric.Sum().DataPoints().Len())
-
-	ld := logs.Emit()
-	records := ld.ResourceLogs().At(0).ScopeLogs().At(0).LogRecords()
-	require.Equal(t, 1, records.Len())
-	assert.Contains(t, records.At(0).Body().Str(), "server_to_client")
-	assert.Equal(t, "abort", records.At(0).Attributes().AsRaw()["canopen.sdo.operation"])
-	assert.Equal(t, int64(0x2001), records.At(0).Attributes().AsRaw()["canopen.sdo.index"])
-	assert.Equal(t, "0x06020000", records.At(0).Attributes().AsRaw()["canopen.sdo.abort_code"])
+	assert.True(t, metrics.Empty())
+	assert.True(t, logs.Empty())
 }
 
 func TestSniffer_SDOChannelsSameNode(t *testing.T) {
 	s := New(Config{
 		InterfaceName: "can0",
-		SDOEmitLog:    true,
 		SDOChannels: []SDOChannel{
 			{NodeID: 1, ClientToServerCobID: 0x601, ServerToClientCobID: 0x581},
 			{NodeID: 1, ClientToServerCobID: 0x611, ServerToClientCobID: 0x591},
 		},
+		SDOObjects: []SDOObjectDef{{
+			NodeID: 1, Index: 0x2001, SubIndex: 0x00,
+			Fields: []Field{{Name: "canopen.test.value", Type: codec.Uint8, EmitLog: true}},
+		}},
 	})
 	logs := emit.NewLogsBuilder()
 
 	s.HandleFrame(cantransport.Frame{ID: 0x601, Data: []byte{0x40, 0x01, 0x20, 0x00}}, nil, logs)
-	s.HandleFrame(cantransport.Frame{ID: 0x611, Data: []byte{0x40, 0x02, 0x20, 0x00}}, nil, logs)
+	s.HandleFrame(cantransport.Frame{ID: 0x611, Data: []byte{0x40, 0x01, 0x20, 0x00}}, nil, logs)
 	s.HandleFrame(cantransport.Frame{ID: 0x581, Data: []byte{0x43, 0x01, 0x20, 0x00, 1, 0, 0, 0}}, nil, logs)
-	s.HandleFrame(cantransport.Frame{ID: 0x591, Data: []byte{0x43, 0x02, 0x20, 0x00, 2, 0, 0, 0}}, nil, logs)
+	s.HandleFrame(cantransport.Frame{ID: 0x591, Data: []byte{0x43, 0x01, 0x20, 0x00, 2, 0, 0, 0}}, nil, logs)
 
 	records := logs.Emit().ResourceLogs().At(0).ScopeLogs().At(0).LogRecords()
 	require.Equal(t, 2, records.Len())
 }
 
 func TestSniffer_SDOUsesDefaultChannelsWhenUnconfigured(t *testing.T) {
-	s := New(Config{InterfaceName: "can0", SDOEmitLog: true})
+	s := New(Config{
+		InterfaceName: "can0",
+		SDOObjects: []SDOObjectDef{{
+			NodeID: 1, Index: 0x2001, SubIndex: 0x00,
+			Fields: []Field{{Name: "canopen.test.value", Type: codec.Uint8, EmitLog: true}},
+		}},
+	})
 	logs := emit.NewLogsBuilder()
 	s.HandleFrame(cantransport.Frame{ID: 0x601, Data: []byte{0x2F, 0x01, 0x20, 0x00, 1, 0, 0, 0}}, nil, logs)
 	require.Equal(t, 1, logs.Emit().ResourceLogs().At(0).ScopeLogs().At(0).LogRecords().Len())
@@ -153,11 +160,12 @@ func TestSniffer_SDOUsesDefaultChannelsWhenUnconfigured(t *testing.T) {
 func TestSniffer_TypedSDOObject(t *testing.T) {
 	s := New(Config{
 		InterfaceName: "can0",
-		SDOEmitLog:    true,
 		SDOObjects: []SDOObjectDef{{
 			NodeID: 1, Index: 0x20F0, SubIndex: 0x11,
-			Name: "canopen.mcu.firmware", Type: codec.Uint32, EmitMetric: true, EmitLog: true,
-			Attributes: map[string]any{"priority": 100},
+			Fields: []Field{{
+				Name: "canopen.mcu.firmware", Type: codec.Uint32, EmitMetric: true, EmitLog: true,
+				Attributes: map[string]any{"priority": 100},
+			}},
 		}},
 	})
 	metrics := emit.NewMetricsBuilder()
@@ -177,28 +185,62 @@ func TestSniffer_TypedSDOObject(t *testing.T) {
 	records := ld.ResourceLogs().At(0).ScopeLogs().At(0).LogRecords()
 	record := records.At(records.Len() - 1)
 	assert.Equal(t, int64(100), record.Attributes().AsRaw()["priority"])
+	assert.InDelta(t, float64(7715102), record.Body().Double(), 0.001)
 }
 
-func TestSniffer_TypedSDOObjectDoesNotRequireRawFilter(t *testing.T) {
-	nodeID := uint8(1)
+// TestSniffer_TypedSDOObjectStruct verifies that declaring multiple Fields
+// on one SDOObjectDef decodes a struct (several named values) from a single
+// completed SDO transfer, each with its own BitOffset - e.g. an
+// IMPACT_INFO-shaped record (X/Y/Z bytes + a 32-bit pin code) - and that all
+// of them land in one combined, structured log record.
+func TestSniffer_TypedSDOObjectStruct(t *testing.T) {
 	s := New(Config{
 		InterfaceName: "can0",
-		SDOFilters:    []SDOFilter{{NodeID: &nodeID, Index: ptrUint16(0x2000)}},
 		SDOObjects: []SDOObjectDef{{
-			NodeID: 1, Index: 0x20F0, SubIndex: 0x11,
-			Name: "canopen.mcu.firmware", Type: codec.Uint32, EmitMetric: true,
+			NodeID: 1, Index: 0x2160, SubIndex: 0x01,
+			Fields: []Field{
+				{Name: "impact.x", BitOffset: 0, Type: codec.Uint8, EmitLog: true},
+				{Name: "impact.y", BitOffset: 8, Type: codec.Uint8, EmitLog: true},
+				{Name: "impact.z", BitOffset: 16, Type: codec.Uint8, EmitLog: true},
+				{Name: "impact.pin_code", BitOffset: 24, Type: codec.Uint32, EmitMetric: true, EmitLog: true},
+			},
 		}},
 	})
 	metrics := emit.NewMetricsBuilder()
-	s.HandleFrame(cantransport.Frame{ID: 0x601, Data: []byte{0x40, 0xF0, 0x20, 0x11, 0, 0, 0, 0}}, metrics, nil)
-	s.HandleFrame(cantransport.Frame{ID: 0x581, Data: []byte{0x43, 0xF0, 0x20, 0x11, 0x1E, 0xB9, 0x75, 0x00}}, metrics, nil)
-	require.Equal(t, 1, metrics.Emit().ResourceMetrics().At(0).ScopeMetrics().At(0).Metrics().Len())
+	logs := emit.NewLogsBuilder()
+
+	// Expedited 4-byte upload only carries 4 payload bytes; use segmented
+	// upload to carry all 7 bytes (x=1, y=2, z=3, pin_code=0x11223344).
+	s.HandleFrame(cantransport.Frame{ID: 0x601, Data: []byte{0x40, 0x60, 0x21, 0x01}}, nil, logs)
+	s.HandleFrame(cantransport.Frame{ID: 0x581, Data: []byte{0x41, 0x60, 0x21, 0x01, 7, 0, 0, 0}}, nil, logs)
+	s.HandleFrame(cantransport.Frame{ID: 0x601, Data: []byte{0x60}}, nil, logs)
+	// t=0, n=0 (all 7 bytes valid), c=1 (last segment) -> command byte 0x01.
+	s.HandleFrame(cantransport.Frame{ID: 0x581, Data: []byte{0x01, 1, 2, 3, 0x44, 0x33, 0x22, 0x11}}, metrics, logs)
+
+	require.False(t, metrics.Empty())
+	md := metrics.Emit()
+	metric := md.ResourceMetrics().At(0).ScopeMetrics().At(0).Metrics().At(0)
+	assert.Equal(t, "impact.pin_code", metric.Name())
+	assert.Equal(t, float64(0x11223344), metric.Gauge().DataPoints().At(0).DoubleValue())
+
+	require.False(t, logs.Empty())
+	records := logs.Emit().ResourceLogs().At(0).ScopeLogs().At(0).LogRecords()
+	require.Equal(t, 1, records.Len())
+	body := records.At(0).Body().Map().AsRaw()
+	assert.InDelta(t, 1.0, body["impact.x"].(float64), 0.001)
+	assert.InDelta(t, 2.0, body["impact.y"].(float64), 0.001)
+	assert.InDelta(t, 3.0, body["impact.z"].(float64), 0.001)
+	assert.InDelta(t, float64(0x11223344), body["impact.pin_code"].(float64), 0.001)
 }
 
-func ptrUint16(v uint16) *uint16 { return &v }
-
 func TestSniffer_SDOReassemblesSegmentedUpload(t *testing.T) {
-	s := New(Config{InterfaceName: "can0", SDOEmitLog: true})
+	s := New(Config{
+		InterfaceName: "can0",
+		SDOObjects: []SDOObjectDef{{
+			NodeID: 1, Index: 0x2001, SubIndex: 0x00,
+			Fields: []Field{{Name: "canopen.test.greeting", Type: codec.VisibleString, ByteLen: 11, EmitLog: true}},
+		}},
+	})
 	logs := emit.NewLogsBuilder()
 
 	// Upload object 0x2001:00 in two segments: "hello w" + "orld".
@@ -214,65 +256,8 @@ func TestSniffer_SDOReassemblesSegmentedUpload(t *testing.T) {
 	s.HandleFrame(cantransport.Frame{ID: 0x581, Data: []byte{0x17, 'o', 'r', 'l', 'd', 0, 0, 0}}, nil, logs)
 
 	require.False(t, logs.Empty())
-	attrs := logs.Emit().ResourceLogs().At(0).ScopeLogs().At(0).LogRecords().At(0).Attributes().AsRaw()
-	assert.Equal(t, int64(0x2001), attrs["canopen.sdo.index"])
-	assert.Equal(t, "68656C6C6F20776F726C64", attrs["canopen.sdo.data"])
-}
-
-func TestSniffer_SDOFilters(t *testing.T) {
-	nodeID := uint8(1)
-	index := uint16(0x2001)
-	subIndex := uint8(0)
-	s := New(Config{
-		InterfaceName: "can0",
-		SDOEmitLog:    true,
-		SDOFilters: []SDOFilter{
-			{NodeID: &nodeID, Index: &index, SubIndex: &subIndex},
-		},
-	})
-	logs := emit.NewLogsBuilder()
-
-	s.HandleFrame(
-		cantransport.Frame{ID: 0x601, Data: []byte{0x2F, 0x01, 0x20, 0x00, 1, 0, 0, 0}},
-		nil,
-		logs,
-	)
-	s.HandleFrame(
-		cantransport.Frame{ID: 0x601, Data: []byte{0x2F, 0x02, 0x20, 0x00, 1, 0, 0, 0}},
-		nil,
-		logs,
-	)
-	s.HandleFrame(
-		cantransport.Frame{ID: 0x602, Data: []byte{0x2F, 0x01, 0x20, 0x00, 1, 0, 0, 0}},
-		nil,
-		logs,
-	)
-
-	require.False(t, logs.Empty())
-	records := logs.Emit().ResourceLogs().At(0).ScopeLogs().At(0).LogRecords()
-	assert.Equal(t, 1, records.Len())
-	assert.Equal(t, int64(0x2001), records.At(0).Attributes().AsRaw()["canopen.sdo.index"])
-}
-
-func TestSniffer_SDONodeFilterIncludesSegmentedTransfers(t *testing.T) {
-	nodeID := uint8(1)
-	s := New(Config{
-		InterfaceName: "can0",
-		SDOEmitLog:    true,
-		SDOFilters:    []SDOFilter{{NodeID: &nodeID}},
-	})
-	logs := emit.NewLogsBuilder()
-
-	s.HandleFrame(
-		cantransport.Frame{ID: 0x601, Data: []byte{0x40, 0x01, 0x20, 0x00}},
-		nil,
-		logs,
-	)
-	s.HandleFrame(cantransport.Frame{ID: 0x581, Data: []byte{0x41, 0x01, 0x20, 0x00, 1, 0, 0, 0}}, nil, logs)
-	s.HandleFrame(cantransport.Frame{ID: 0x601, Data: []byte{0x60}}, nil, logs)
-	s.HandleFrame(cantransport.Frame{ID: 0x581, Data: []byte{0x0F, 'x', 0, 0, 0, 0, 0, 0}}, nil, logs)
-
-	require.False(t, logs.Empty())
+	body := logs.Emit().ResourceLogs().At(0).ScopeLogs().At(0).LogRecords().At(0).Body()
+	assert.Equal(t, "hello world", body.Str())
 }
 
 func TestSniffer_UnknownCobID_Ignored(t *testing.T) {
@@ -325,10 +310,10 @@ func TestSniffer_RawCapture_UnmatchedCobIDNotCaptured(t *testing.T) {
 }
 
 // TestSniffer_RawMessage_DecodesDeclaredSignals verifies that a raw message
-// definition (e.g. modeling TRUCKCOM's 0x8008 tcReadFWPartNo: command word
+// definition with a command word
 // echo at bytes 0-1, then a little-endian uint32 part number at bytes 2-5
 // and a little-endian uint16 extension at bytes 6-7) decodes into named
-// signals without any bespoke processor.
+// fields without any bespoke processor.
 func TestSniffer_RawMessage_DecodesDeclaredSignals(t *testing.T) {
 	s := New(Config{
 		InterfaceName: "can0",
@@ -338,11 +323,11 @@ func TestSniffer_RawMessage_DecodesDeclaredSignals(t *testing.T) {
 		RawMessages: map[uint32][]RawMessageDef{
 			0x50E: {
 				{
-					Name:  "truckcom.read_fw_part_no",
+					Name:  "raw.read_part_no",
 					Match: []RawMatch{{ByteOffset: 0, Value: 0x08}, {ByteOffset: 1, Value: 0x80}},
-					Signals: []PDOSignal{
-						{Name: "truckcom.fw_part_no", BitOffset: 16, Type: codec.Uint32, EmitMetric: true},
-						{Name: "truckcom.fw_extension", BitOffset: 48, Type: codec.Uint16, EmitLog: true},
+					Fields: []Field{
+						{Name: "raw.fw_part_no", BitOffset: 16, Type: codec.Uint32, EmitMetric: true},
+						{Name: "raw.fw_extension", BitOffset: 48, Type: codec.Uint16, EmitLog: true},
 					},
 				},
 			},
@@ -359,14 +344,14 @@ func TestSniffer_RawMessage_DecodesDeclaredSignals(t *testing.T) {
 
 	md := metrics.Emit()
 	metric := md.ResourceMetrics().At(0).ScopeMetrics().At(0).Metrics().At(0)
-	assert.Equal(t, "truckcom.fw_part_no", metric.Name())
+	assert.Equal(t, "raw.fw_part_no", metric.Name())
 	assert.Equal(t, float64(7715102), metric.Gauge().DataPoints().At(0).DoubleValue())
 
 	ld := logs.Emit()
 	records := ld.ResourceLogs().At(0).ScopeLogs().At(0).LogRecords()
 	require.Equal(t, 1, records.Len())
-	assert.Equal(t, "truckcom.fw_extension", records.At(0).Attributes().AsRaw()["canopen.signal.name"])
-	assert.Equal(t, float64(3), records.At(0).Attributes().AsRaw()["canopen.signal.value"])
+	assert.Equal(t, "raw.read_part_no", records.At(0).Attributes().AsRaw()["canopen.raw.message"])
+	assert.InDelta(t, 3.0, records.At(0).Body().Double(), 0.001)
 }
 
 // TestSniffer_RawMessage_NoMatchFallsBackToRawHex verifies that when a
@@ -382,9 +367,9 @@ func TestSniffer_RawMessage_NoMatchFallsBackToRawHex(t *testing.T) {
 		RawMessages: map[uint32][]RawMessageDef{
 			0x50E: {
 				{
-					Name:    "truckcom.read_fw_part_no",
-					Match:   []RawMatch{{ByteOffset: 0, Value: 0x08}, {ByteOffset: 1, Value: 0x80}},
-					Signals: []PDOSignal{{Name: "truckcom.fw_part_no", BitOffset: 16, Type: codec.Uint32, EmitMetric: true}},
+					Name:   "raw.read_part_no",
+					Match:  []RawMatch{{ByteOffset: 0, Value: 0x08}, {ByteOffset: 1, Value: 0x80}},
+					Fields: []Field{{Name: "raw.fw_part_no", BitOffset: 16, Type: codec.Uint32, EmitMetric: true}},
 				},
 			},
 		},
@@ -392,7 +377,7 @@ func TestSniffer_RawMessage_NoMatchFallsBackToRawHex(t *testing.T) {
 	metrics := emit.NewMetricsBuilder()
 	logs := emit.NewLogsBuilder()
 
-	// Different command word (0x8046 tcCheckCrc) doesn't match the declared message.
+	// A different command word does not match the declared message.
 	s.HandleFrame(cantransport.Frame{ID: 0x50E, Data: []byte{0x46, 0x80, 1, 0, 0, 0, 0, 0}}, metrics, logs)
 
 	require.False(t, metrics.Empty())

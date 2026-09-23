@@ -205,3 +205,21 @@ func ApplyScale(v Value, scale, offset float64) float64 {
 	}
 	return v.AsFloat()*scale + offset
 }
+
+// BodyValue returns the single, canonical representation of a decoded value
+// used everywhere it's placed into a structured log body map - the same
+// conversion regardless of which sniffing/polling feature decoded it.
+// Bytes render as uppercase hex; VisibleString renders as its string; every
+// other type renders as its scaled float64 (see ApplyScale). Metrics never
+// call this - Bytes/VisibleString fields can't be emitted as metrics (see
+// FieldConfig.validate), so metrics always use ApplyScale directly.
+func (v Value) BodyValue(scale, offset float64) any {
+	switch v.Type {
+	case Bytes:
+		return fmt.Sprintf("%X", v.Bytes)
+	case VisibleString:
+		return v.String
+	default:
+		return ApplyScale(v, scale, offset)
+	}
+}
