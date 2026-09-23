@@ -123,7 +123,6 @@ func buildSnifferFields(fields []FieldConfig) []sniffer.Field {
 	return out
 }
 
-
 func (r *canopenReceiver) Start(ctx context.Context, _ component.Host) error {
 	r.startOnce.Do(func() {
 		r.startErr = r.doStart(ctx)
