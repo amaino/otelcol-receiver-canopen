@@ -139,6 +139,40 @@ these filters and emitting telemetry.
 | `sniff.sdo.objects[].type` | string | Datatype, using the same types as PDO signals. |
 | `sniff.sdo.objects[].metrics` / `.logs` | bool | Enable metric and/or log emission for the decoded value. |
 
+#### Active SDO polling (`sniff.sdo.poll`)
+
+Active polling sends CANopen upload requests for configured objects. It is
+independent of passive SDO observation and reuses the same object decoding and
+emission fields.
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `sniff.sdo.poll.mode` | string | `once` | `once` requests each object once; `interval` repeats the complete object list. |
+| `sniff.sdo.poll.interval` | duration | required for `interval` | Delay between polling cycles. |
+| `sniff.sdo.poll.timeout` | duration | `2s` | Maximum time to wait for an upload response or segmented transfer. |
+| `sniff.sdo.poll.retry` | bool | `false` | Retry a failed request with exponential backoff. |
+| `sniff.sdo.poll.backoff` | duration | `1s` | Initial retry delay. |
+| `sniff.sdo.poll.max_backoff` | duration | `1m` | Maximum retry delay. |
+| `sniff.sdo.poll.max_retries` | integer | unlimited | Maximum retries after the initial request; omitted means unlimited when retrying. |
+| `sniff.sdo.poll.objects` | list | empty | SDO objects to upload sequentially. Each entry uses the typed SDO object fields above. |
+
+Example:
+
+```yaml
+sdo:
+  poll:
+    mode: once
+    retry: true
+    timeout: 2s
+    objects:
+      - node_id: 30
+        index: 0x20F0
+        sub_index: 0x11
+        name: canopen.mcu.firmware
+        type: uint32
+        logs: true
+```
+
 #### Raw frame capture (`sniff.raw`)
 
 | Field | Type | Description |

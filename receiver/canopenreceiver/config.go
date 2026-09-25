@@ -214,6 +214,56 @@ type SDOSniffConfig struct {
 	Channels []SDOChannelConfig `mapstructure:"channels"`
 	Objects  []SDOObjectConfig  `mapstructure:"objects"`
 	Raw      SDORawConfig       `mapstructure:"raw"`
+	Poll     SDOPollConfig      `mapstructure:"poll"`
+}
+
+// SDOPollConfig configures active SDO upload requests. Objects are requested
+// sequentially so a response can be unambiguously associated with its request.
+type SDOPollConfig struct {
+	Mode       string            `mapstructure:"mode"`
+	Interval   time.Duration     `mapstructure:"interval"`
+	Timeout    time.Duration     `mapstructure:"timeout"`
+	Retry      bool              `mapstructure:"retry"`
+	Backoff    time.Duration     `mapstructure:"backoff"`
+	MaxBackoff time.Duration     `mapstructure:"max_backoff"`
+	MaxRetries *int              `mapstructure:"max_retries"`
+	Objects    []SDOObjectConfig `mapstructure:"objects"`
+}
+
+func (p *SDOPollConfig) validate() error {
+	if p.Mode == "" {
+		p.Mode = "once"
+	}
+	if p.Mode != "once" && p.Mode != "interval" {
+		return fmt.Errorf("sniff.sdo.poll: mode must be one of once, interval")
+	}
+	if p.Mode == "interval" && p.Interval <= 0 {
+		return errors.New("sniff.sdo.poll: interval must be > 0 in interval mode")
+	}
+	if p.Timeout < 0 {
+		return errors.New("sniff.sdo.poll: timeout must be >= 0")
+	}
+	if p.Backoff < 0 || p.MaxBackoff < 0 {
+		return errors.New("sniff.sdo.poll: backoff values must be >= 0")
+	}
+	if p.MaxBackoff > 0 && p.Backoff > p.MaxBackoff {
+		return errors.New("sniff.sdo.poll: max_backoff must be >= backoff")
+	}
+	if p.MaxRetries != nil && *p.MaxRetries < 0 {
+		return errors.New("sniff.sdo.poll: max_retries must be >= 0")
+	}
+	seen := make(map[string]struct{}, len(p.Objects))
+	for i := range p.Objects {
+		if err := p.Objects[i].validate(); err != nil {
+			return fmt.Errorf("sniff.sdo.poll.objects[%d]: %w", i, err)
+		}
+		key := fmt.Sprintf("%d:%04X:%02X", p.Objects[i].NodeID, p.Objects[i].Index, p.Objects[i].SubIndex)
+		if _, duplicate := seen[key]; duplicate {
+			return fmt.Errorf("sniff.sdo.poll.objects: duplicate object %s", key)
+		}
+		seen[key] = struct{}{}
+	}
+	return nil
 }
 
 // SDOChannelConfig identifies one standard CANopen SDO client/server COB-ID
@@ -268,6 +318,9 @@ func (s *SDOSniffConfig) validate() error {
 			return fmt.Errorf("sniff.sdo.objects: duplicate object %s", key)
 		}
 		objectSeen[key] = struct{}{}
+	}
+	if err := s.Poll.validate(); err != nil {
+		return err
 	}
 	for i := range s.Raw.Filters {
 		if err := s.Raw.Filters[i].validate(); err != nil {
@@ -527,6 +580,11 @@ func (cfg *Config) Validate() error {
 	}
 	for _, object := range cfg.Sniff.SDO.Objects {
 		if err := checkOutputs(fmt.Sprintf("sdo object %q", object.Name), object.Metrics, object.Logs); err != nil {
+			return err
+		}
+	}
+	for _, object := range cfg.Sniff.SDO.Poll.Objects {
+		if err := checkOutputs(fmt.Sprintf("sdo poll object %q", object.Name), object.Metrics, object.Logs); err != nil {
 			return err
 		}
 	}

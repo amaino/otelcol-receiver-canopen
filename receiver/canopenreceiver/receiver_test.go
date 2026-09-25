@@ -75,3 +75,104 @@ func TestReceiver_EndToEnd_SniffPDOAndEMCY(t *testing.T) {
 	lr := ld.ResourceLogs().At(0).ScopeLogs().At(0).LogRecords().At(0)
 	assert.Contains(t, lr.Body().Str(), "emergency")
 }
+
+func TestReceiver_SDOUploadPollOnce(t *testing.T) {
+	bus := cantransport.NewFakeBus()
+	monitor, err := bus.Dial(context.Background(), "vcan0")
+	require.NoError(t, err)
+	defer monitor.Close()
+
+	cfg := createDefaultConfig().(*Config)
+	cfg.Interface = "vcan0"
+	cfg.ReadTimeout = 20 * time.Millisecond
+	cfg.Metrics.FlushInterval = 20 * time.Millisecond
+	cfg.Metrics.Enabled = false
+	cfg.Logs.Enabled = true
+	cfg.Sniff.SDO.Channels = []SDOChannelConfig{{
+		NodeID: 1, ClientToServerCobID: 0x601, ServerToClientCobID: 0x581,
+	}}
+	cfg.Sniff.SDO.Poll = SDOPollConfig{
+		Mode:    "once",
+		Timeout: time.Second,
+		Objects: []SDOObjectConfig{{
+			NodeID: 1, Index: 0x2001, SubIndex: 0,
+			SignalConfig: SignalConfig{Name: "device.value", Type: codec.Uint16, Logs: true},
+		}},
+	}
+	require.NoError(t, cfg.Validate())
+
+	set := receivertest.NewNopSettings(metadata.Type)
+	r := newCanopenReceiver(cfg, set, fakeBusDialer{bus: bus})
+	logsSink := new(consumertest.LogsSink)
+	r.logsConsumer = logsSink
+	require.NoError(t, r.Start(context.Background(), componenttest.NewNopHost()))
+	defer func() { require.NoError(t, r.Shutdown(context.Background())) }()
+
+	recvCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	request, err := monitor.Recv(recvCtx)
+	require.NoError(t, err)
+	assert.Equal(t, uint32(0x601), request.ID)
+	assert.Equal(t, []byte{0x40, 0x01, 0x20, 0, 0, 0, 0, 0}, request.Data)
+
+	bus.Inject(cantransport.Frame{ID: 0x581, Data: []byte{0x4B, 0x01, 0x20, 0, 0x34, 0x12, 0, 0}})
+	require.Eventually(t, func() bool { return len(logsSink.AllLogs()) > 0 }, time.Second, 10*time.Millisecond)
+	log := logsSink.AllLogs()[0].ResourceLogs().At(0).ScopeLogs().At(0).LogRecords().At(0)
+	assert.Contains(t, log.Body().Str(), "device.value")
+}
+
+func TestReceiver_SDOUploadPollSegmented(t *testing.T) {
+	bus := cantransport.NewFakeBus()
+	monitor, err := bus.Dial(context.Background(), "vcan0")
+	require.NoError(t, err)
+	defer monitor.Close()
+
+	cfg := createDefaultConfig().(*Config)
+	cfg.Interface = "vcan0"
+	cfg.ReadTimeout = 20 * time.Millisecond
+	cfg.Metrics.FlushInterval = 20 * time.Millisecond
+	cfg.Metrics.Enabled = false
+	cfg.Sniff.SDO.Poll = SDOPollConfig{
+		Mode:    "once",
+		Timeout: time.Second,
+		Objects: []SDOObjectConfig{{
+			NodeID: 1, Index: 0x2001, SubIndex: 0,
+			SignalConfig: SignalConfig{Name: "device.text", Type: codec.VisibleString, ByteLen: 11, Logs: true},
+		}},
+	}
+	require.NoError(t, cfg.Validate())
+
+	set := receivertest.NewNopSettings(metadata.Type)
+	r := newCanopenReceiver(cfg, set, fakeBusDialer{bus: bus})
+	logsSink := new(consumertest.LogsSink)
+	r.logsConsumer = logsSink
+	require.NoError(t, r.Start(context.Background(), componenttest.NewNopHost()))
+	defer func() { require.NoError(t, r.Shutdown(context.Background())) }()
+
+	recvCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	waitForData := func(expected []byte) {
+		t.Helper()
+		for {
+			frame, receiveErr := monitor.Recv(recvCtx)
+			require.NoError(t, receiveErr)
+			if assert.ObjectsAreEqual(expected, frame.Data) {
+				return
+			}
+		}
+	}
+	request, err := monitor.Recv(recvCtx)
+	require.NoError(t, err)
+	assert.Equal(t, []byte{0x40, 0x01, 0x20, 0, 0, 0, 0, 0}, request.Data)
+
+	bus.Inject(cantransport.Frame{ID: 0x581, Data: []byte{0x41, 0x01, 0x20, 0, 0x0B, 0, 0, 0}})
+	waitForData([]byte{0x60, 0, 0, 0, 0, 0, 0, 0})
+
+	bus.Inject(cantransport.Frame{ID: 0x581, Data: []byte{0x00, 'h', 'e', 'l', 'l', 'o', ' ', 'w'}})
+	waitForData([]byte{0x70, 0, 0, 0, 0, 0, 0, 0})
+	bus.Inject(cantransport.Frame{ID: 0x581, Data: []byte{0x17, 'o', 'r', 'l', 'd', 0, 0, 0}})
+
+	require.Eventually(t, func() bool { return len(logsSink.AllLogs()) > 0 }, time.Second, 10*time.Millisecond)
+	log := logsSink.AllLogs()[0].ResourceLogs().At(0).ScopeLogs().At(0).LogRecords().At(0)
+	assert.Contains(t, log.Body().Str(), "device.text")
+}
