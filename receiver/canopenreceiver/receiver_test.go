@@ -156,3 +156,196 @@ func TestReceiver_MetricsAndLogsFlushIndependently(t *testing.T) {
 		})
 	}
 }
+func TestReceiver_SDOUploadPollOnce(t *testing.T) {
+	bus := cantransport.NewFakeBus()
+	monitor, err := bus.Dial(context.Background(), "vcan0")
+	require.NoError(t, err)
+	defer monitor.Close()
+
+	cfg := createDefaultConfig().(*Config)
+	cfg.Interface = "vcan0"
+	cfg.ReadTimeout = 20 * time.Millisecond
+	cfg.Metrics.FlushInterval = 20 * time.Millisecond
+	cfg.Metrics.Enabled = false
+	cfg.Logs.Enabled = true
+	cfg.Logs.FlushInterval = 20 * time.Millisecond
+	cfg.SDO.Sniff.Channels = []SDOChannelConfig{{
+		NodeID: 1, ClientToServerCobID: 0x601, ServerToClientCobID: 0x581,
+	}}
+	cfg.SDO.Poll = SDOPollConfig{
+		Mode:    "once",
+		Timeout: time.Second,
+		Objects: []SDOObjectConfig{{
+			NodeID: 1, Index: 0x2001, SubIndex: 0,
+			Fields: []FieldConfig{{Name: "device.value", Type: codec.Uint16, Logs: true}},
+		}},
+	}
+	require.NoError(t, cfg.Validate())
+
+	set := receivertest.NewNopSettings(metadata.Type)
+	r := newCanopenReceiver(cfg, set, fakeBusDialer{bus: bus})
+	logsSink := new(consumertest.LogsSink)
+	r.logsConsumer = logsSink
+	require.NoError(t, r.Start(context.Background(), componenttest.NewNopHost()))
+	defer func() { require.NoError(t, r.Shutdown(context.Background())) }()
+
+	recvCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	request, err := monitor.Recv(recvCtx)
+	require.NoError(t, err)
+	assert.Equal(t, uint32(0x601), request.ID)
+	assert.Equal(t, []byte{0x40, 0x01, 0x20, 0, 0, 0, 0, 0}, request.Data)
+
+	bus.Inject(cantransport.Frame{ID: 0x581, Data: []byte{0x4B, 0x01, 0x20, 0, 0x34, 0x12, 0, 0}})
+	require.Eventually(t, func() bool { return len(logsSink.AllLogs()) > 0 }, time.Second, 10*time.Millisecond)
+	log := logsSink.AllLogs()[0].ResourceLogs().At(0).ScopeLogs().At(0).LogRecords().At(0)
+	assert.InDelta(t, float64(0x1234), log.Body().Double(), 0.001)
+}
+
+func TestReceiver_SDOUploadPollSegmented(t *testing.T) {
+	bus := cantransport.NewFakeBus()
+	monitor, err := bus.Dial(context.Background(), "vcan0")
+	require.NoError(t, err)
+	defer monitor.Close()
+
+	cfg := createDefaultConfig().(*Config)
+	cfg.Interface = "vcan0"
+	cfg.ReadTimeout = 20 * time.Millisecond
+	cfg.Metrics.FlushInterval = 20 * time.Millisecond
+	cfg.Metrics.Enabled = false
+	cfg.Logs.FlushInterval = 20 * time.Millisecond
+	cfg.SDO.Poll = SDOPollConfig{
+		Mode:    "once",
+		Timeout: time.Second,
+		Objects: []SDOObjectConfig{{
+			NodeID: 1, Index: 0x2001, SubIndex: 0,
+			Fields: []FieldConfig{{Name: "device.text", Type: codec.VisibleString, ByteLen: 11, Logs: true}},
+		}},
+	}
+	require.NoError(t, cfg.Validate())
+
+	set := receivertest.NewNopSettings(metadata.Type)
+	r := newCanopenReceiver(cfg, set, fakeBusDialer{bus: bus})
+	logsSink := new(consumertest.LogsSink)
+	r.logsConsumer = logsSink
+	require.NoError(t, r.Start(context.Background(), componenttest.NewNopHost()))
+	defer func() { require.NoError(t, r.Shutdown(context.Background())) }()
+
+	recvCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	waitForData := func(expected []byte) {
+		t.Helper()
+		for {
+			frame, receiveErr := monitor.Recv(recvCtx)
+			require.NoError(t, receiveErr)
+			if assert.ObjectsAreEqual(expected, frame.Data) {
+				return
+			}
+		}
+	}
+	request, err := monitor.Recv(recvCtx)
+	require.NoError(t, err)
+	assert.Equal(t, []byte{0x40, 0x01, 0x20, 0, 0, 0, 0, 0}, request.Data)
+
+	bus.Inject(cantransport.Frame{ID: 0x581, Data: []byte{0x41, 0x01, 0x20, 0, 0x0B, 0, 0, 0}})
+	waitForData([]byte{0x60, 0, 0, 0, 0, 0, 0, 0})
+
+	bus.Inject(cantransport.Frame{ID: 0x581, Data: []byte{0x00, 'h', 'e', 'l', 'l', 'o', ' ', 'w'}})
+	waitForData([]byte{0x70, 0, 0, 0, 0, 0, 0, 0})
+	bus.Inject(cantransport.Frame{ID: 0x581, Data: []byte{0x17, 'o', 'r', 'l', 'd', 0, 0, 0}})
+
+	require.Eventually(t, func() bool { return len(logsSink.AllLogs()) > 0 }, time.Second, 10*time.Millisecond)
+	log := logsSink.AllLogs()[0].ResourceLogs().At(0).ScopeLogs().At(0).LogRecords().At(0)
+	assert.Equal(t, "hello world", log.Body().Str())
+}
+
+func TestReceiver_SDOUploadPollRetriesAfterAbort(t *testing.T) {
+	bus := cantransport.NewFakeBus()
+	monitor, err := bus.Dial(context.Background(), "vcan0")
+	require.NoError(t, err)
+	defer monitor.Close()
+
+	cfg := createDefaultConfig().(*Config)
+	cfg.Interface = "vcan0"
+	cfg.ReadTimeout = 20 * time.Millisecond
+	cfg.Metrics.FlushInterval = 20 * time.Millisecond
+	cfg.Metrics.Enabled = false
+	cfg.SDO.Poll = SDOPollConfig{
+		Mode:       "once",
+		Timeout:    100 * time.Millisecond,
+		Retry:      true,
+		Backoff:    time.Millisecond,
+		MaxBackoff: time.Millisecond,
+		MaxRetries: intPointer(1),
+		Objects: []SDOObjectConfig{{
+			NodeID: 1, Index: 0x2001, SubIndex: 0,
+			Fields: []FieldConfig{{Name: "device.value", Type: codec.Uint16}},
+		}},
+	}
+	require.NoError(t, cfg.Validate())
+
+	set := receivertest.NewNopSettings(metadata.Type)
+	r := newCanopenReceiver(cfg, set, fakeBusDialer{bus: bus})
+	require.NoError(t, r.Start(context.Background(), componenttest.NewNopHost()))
+	defer func() { require.NoError(t, r.Shutdown(context.Background())) }()
+
+	recvCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	firstRequest, err := monitor.Recv(recvCtx)
+	require.NoError(t, err)
+	assert.Equal(t, uint32(0x601), firstRequest.ID)
+
+	bus.Inject(cantransport.Frame{ID: 0x581, Data: []byte{0x80, 0x01, 0x20, 0, 0, 0, 0x02, 0x06}})
+	waitForFrameData(t, recvCtx, monitor, firstRequest.Data)
+
+	bus.Inject(cantransport.Frame{ID: 0x581, Data: []byte{0x4B, 0x01, 0x20, 0, 0x34, 0x12, 0, 0}})
+}
+
+func TestReceiver_SDOUploadPollInterval(t *testing.T) {
+	bus := cantransport.NewFakeBus()
+	monitor, err := bus.Dial(context.Background(), "vcan0")
+	require.NoError(t, err)
+	defer monitor.Close()
+
+	cfg := createDefaultConfig().(*Config)
+	cfg.Interface = "vcan0"
+	cfg.ReadTimeout = 20 * time.Millisecond
+	cfg.SDO.Poll = SDOPollConfig{
+		Mode:     "interval",
+		Interval: 30 * time.Millisecond,
+		Timeout:  time.Second,
+		Objects: []SDOObjectConfig{{
+			NodeID: 1, Index: 0x2001, SubIndex: 0,
+			Fields: []FieldConfig{{Name: "device.value", Type: codec.Uint16}},
+		}},
+	}
+	require.NoError(t, cfg.Validate())
+
+	set := receivertest.NewNopSettings(metadata.Type)
+	r := newCanopenReceiver(cfg, set, fakeBusDialer{bus: bus})
+	require.NoError(t, r.Start(context.Background(), componenttest.NewNopHost()))
+	defer func() { require.NoError(t, r.Shutdown(context.Background())) }()
+
+	recvCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	firstRequest, err := monitor.Recv(recvCtx)
+	require.NoError(t, err)
+	bus.Inject(cantransport.Frame{ID: 0x581, Data: []byte{0x4B, 0x01, 0x20, 0, 0x34, 0x12, 0, 0}})
+
+	waitForFrameData(t, recvCtx, monitor, firstRequest.Data)
+}
+
+func waitForFrameData(t *testing.T, ctx context.Context, conn cantransport.Conn, expected []byte) {
+	t.Helper()
+	for {
+		frame, err := conn.Recv(ctx)
+		require.NoError(t, err)
+		if assert.ObjectsAreEqual(expected, frame.Data) {
+			return
+		}
+	}
+}
+
+func intPointer(value int) *int {
+	return &value
+}

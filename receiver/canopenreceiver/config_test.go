@@ -314,8 +314,9 @@ func TestConfig_Validate_RawMessageDuplicateFieldName(t *testing.T) {
 	require.Error(t, cfg.Validate())
 }
 
-func TestConfig_Validate_SDOPollObjectRequiresInterval(t *testing.T) {
+func TestConfig_Validate_SDOPollIntervalRequiresInterval(t *testing.T) {
 	cfg := validBaseConfig()
+	cfg.SDO.Poll.Mode = "interval"
 	cfg.SDO.Poll.Objects = []SDOObjectConfig{{
 		NodeID: 1, Index: 0x20F0, SubIndex: 0x11,
 		Fields: []FieldConfig{{Name: "firmware", Type: codec.Uint32, Logs: true}},

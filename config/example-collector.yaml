@@ -37,6 +37,21 @@ receivers:
                 metric_type: gauge
                 attributes:
                   source: sdo
+      poll:
+        mode: once
+        retry: true
+        max_retries: 3
+        timeout: 2s
+        objects:
+          - node_id: 1
+            index: 0x20F0
+            sub_index: 0x11
+            fields:
+              - name: canopen.mcu.firmware
+                type: uint32
+                metrics: true
+                logs: true
+                metric_type: gauge
     pdo:
       - name: motor_tpdo1
         cob_id: 0x181

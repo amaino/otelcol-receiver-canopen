@@ -37,6 +37,8 @@ type canopenReceiver struct {
 	conn   cantransport.Conn
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
+	sendMu sync.Mutex
+	poller *sdoPoller
 
 	startOnce    sync.Once
 	shutdownOnce sync.Once
@@ -82,6 +84,12 @@ func buildSnifferConfig(cfg *Config) sniffer.Config {
 			Fields: buildSnifferFields(object.Fields),
 		})
 	}
+	for _, object := range cfg.SDO.Poll.Objects {
+		sc.SDOObjects = append(sc.SDOObjects, sniffer.SDOObjectDef{
+			NodeID: object.NodeID, Index: object.Index, SubIndex: object.SubIndex,
+			Fields: buildSnifferFields(object.Fields),
+		})
+	}
 	for _, id := range cfg.Raw.Sniff.CobIDs {
 		sc.RawCobIDs[id] = struct{}{}
 	}
@@ -93,8 +101,6 @@ func buildSnifferConfig(cfg *Config) sniffer.Config {
 		sc.RawMessages[msg.CobID] = append(sc.RawMessages[msg.CobID], def)
 		sc.RawCobIDs[msg.CobID] = struct{}{}
 	}
-	// cfg.SDO.Poll and cfg.Raw.Transactions are intentionally not read here:
-	// active polling/requests are not implemented yet.
 	for _, pdo := range cfg.PDO {
 		sc.PDOs[pdo.CobID] = sniffer.PDODef{Name: pdo.Name, CobID: pdo.CobID, Fields: buildSnifferFields(pdo.Fields)}
 	}
@@ -144,8 +150,13 @@ func (r *canopenReceiver) doStart(ctx context.Context) error {
 
 	r.wg.Add(1)
 	go r.dispatchLoop(runCtx)
+	if len(r.cfg.SDO.Poll.Objects) > 0 {
+		r.poller = newSDOPoller(r, runCtx)
+		r.wg.Add(1)
+		go r.poller.run()
+	}
 
-	if r.cfg.Metrics.Enabled {
+	if r.cfg.Metrics.Enabled || r.cfg.Logs.Enabled {
 		r.wg.Add(1)
 		go r.metricsFlushLoop(runCtx)
 	}
@@ -217,10 +228,26 @@ func (r *canopenReceiver) dispatchLoop(ctx context.Context) {
 			continue
 		}
 
+		if r.poller != nil {
+			r.poller.handleFrame(f)
+		}
 		r.buildersMu.Lock()
 		r.sniff.HandleFrame(f, r.metricsIfEnabled(), r.logsIfEnabled())
 		r.buildersMu.Unlock()
 	}
+}
+
+func (r *canopenReceiver) sendFrame(ctx context.Context, f cantransport.Frame) error {
+	r.sendMu.Lock()
+	defer r.sendMu.Unlock()
+	return r.conn.Send(ctx, f)
+}
+
+func (r *canopenReceiver) sendPollFrame(ctx context.Context, f cantransport.Frame) error {
+	r.buildersMu.Lock()
+	r.sniff.HandleFrame(f, r.metricsIfEnabled(), r.logsIfEnabled())
+	r.buildersMu.Unlock()
+	return r.sendFrame(ctx, f)
 }
 
 func (r *canopenReceiver) metricsIfEnabled() *emit.MetricsBuilder {

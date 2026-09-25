@@ -1,9 +1,9 @@
 // Package canopenreceiver implements an OpenTelemetry Collector receiver for
 // CANopen traffic over Linux SocketCAN. This version supports passive
 // sniffing of standard SDO (including segmented transfers), PDO/EMCY/heartbeat
-// traffic, and declarative raw frames. Configuration controls which fields
-// are decoded and whether each is emitted as a metric, a log, or both.
-// Active SDO polling is added in a later commit.
+// traffic, active SDO uploads, and declarative raw frames. Configuration
+// controls which signals are decoded and whether each is emitted as a metric,
+// a log, or both.
 package canopenreceiver
 
 import (
@@ -220,6 +220,54 @@ type SDOSniffConfig struct {
 	Objects  []SDOObjectConfig  `mapstructure:"objects"`
 }
 
+// SDOPollConfig configures active SDO upload requests for the declared objects.
+type SDOPollConfig struct {
+	Mode       string            `mapstructure:"mode"`
+	Interval   time.Duration     `mapstructure:"interval"`
+	Timeout    time.Duration     `mapstructure:"timeout"`
+	Retry      bool              `mapstructure:"retry"`
+	Backoff    time.Duration     `mapstructure:"backoff"`
+	MaxBackoff time.Duration     `mapstructure:"max_backoff"`
+	MaxRetries *int              `mapstructure:"max_retries"`
+	Objects    []SDOObjectConfig `mapstructure:"objects"`
+}
+
+func (p *SDOPollConfig) validate() error {
+	if p.Mode == "" {
+		p.Mode = "once"
+	}
+	if p.Mode != "once" && p.Mode != "interval" {
+		return fmt.Errorf("sniff.sdo.poll: mode must be one of once, interval")
+	}
+	if p.Mode == "interval" && p.Interval <= 0 {
+		return errors.New("sniff.sdo.poll: interval must be > 0 in interval mode")
+	}
+	if p.Timeout < 0 {
+		return errors.New("sniff.sdo.poll: timeout must be >= 0")
+	}
+	if p.Backoff < 0 || p.MaxBackoff < 0 {
+		return errors.New("sniff.sdo.poll: backoff values must be >= 0")
+	}
+	if p.MaxBackoff > 0 && p.Backoff > p.MaxBackoff {
+		return errors.New("sniff.sdo.poll: max_backoff must be >= backoff")
+	}
+	if p.MaxRetries != nil && *p.MaxRetries < 0 {
+		return errors.New("sniff.sdo.poll: max_retries must be >= 0")
+	}
+	seen := make(map[string]struct{}, len(p.Objects))
+	for i := range p.Objects {
+		if err := p.Objects[i].validate(fmt.Sprintf("sdo.poll.objects[%d]", i)); err != nil {
+			return err
+		}
+		key := fmt.Sprintf("%d:%04X:%02X", p.Objects[i].NodeID, p.Objects[i].Index, p.Objects[i].SubIndex)
+		if _, duplicate := seen[key]; duplicate {
+			return fmt.Errorf("sniff.sdo.poll.objects: duplicate object %s", key)
+		}
+		seen[key] = struct{}{}
+	}
+	return nil
+}
+
 // SDOChannelConfig identifies one standard CANopen SDO client/server COB-ID
 // pair. Multiple channels may use the same node ID.
 type SDOChannelConfig struct {
@@ -268,39 +316,7 @@ func (s *SDOSniffConfig) validate() error {
 	return nil
 }
 
-// SDOPollConfig declares standard CANopen SDO objects to actively poll.
-// Config/validation only: nothing in this receiver initiates an SDO
-// transfer yet (see this package's doc comment). Declaring entries here
-// has no runtime effect today.
-type SDOPollConfig struct {
-	Interval time.Duration     `mapstructure:"interval"`
-	Objects  []SDOObjectConfig `mapstructure:"objects"`
-}
-
-func (p *SDOPollConfig) validate() error {
-	if len(p.Objects) == 0 {
-		return nil
-	}
-	if p.Interval <= 0 {
-		return errors.New("sdo.poll: interval must be > 0 when objects are declared")
-	}
-	seen := make(map[string]struct{}, len(p.Objects))
-	for i := range p.Objects {
-		if err := p.Objects[i].validate("sdo.poll.objects"); err != nil {
-			return fmt.Errorf("sdo.poll.objects[%d]: %w", i, err)
-		}
-		key := fmt.Sprintf("%d:%04X:%02X", p.Objects[i].NodeID, p.Objects[i].Index, p.Objects[i].SubIndex)
-		if _, dup := seen[key]; dup {
-			return fmt.Errorf("sdo.poll.objects: duplicate object %s", key)
-		}
-		seen[key] = struct{}{}
-	}
-	return nil
-}
-
-// SDOConfig groups standard-CANopen-SDO config: passive Sniff (real,
-// working today) and active Poll (config/validation-only for now; see
-// SDOPollConfig).
+// SDOConfig groups passive SDO sniffing and active object polling.
 type SDOConfig struct {
 	Sniff SDOSniffConfig `mapstructure:"sniff"`
 	Poll  SDOPollConfig  `mapstructure:"poll"`

@@ -10,10 +10,10 @@
 
 An OpenTelemetry Collector receiver for CANopen traffic over Linux SocketCAN.
 
-At this stage the receiver supports **sniffing**: passively decoding PDO
-frames, EMCY (emergency) messages, heartbeat/NMT state changes, and SDO
-traffic exchanged by other nodes as it appears on the bus, fully driven by
-declarative configuration. Active SDO polling is planned as a follow-up.
+The receiver supports passive sniffing of PDO frames, EMCY (emergency)
+messages, heartbeat/NMT state changes, and SDO traffic exchanged by other
+nodes. It also supports active SDO uploads configured under `sniff.sdo.poll`.
+All behavior is driven by declarative configuration.
 
 Every field you configure from a PDO, a raw message, an SDO object, or a raw
 transaction's response can be emitted as a metric, a log, or both. Declaring
@@ -109,9 +109,8 @@ this is validated at startup.
 
 ### SDO (`sdo`)
 
-Standard CANopen SDO config is split into `sdo.sniff` (passive observation,
-implemented today) and `sdo.poll` (active polling - **config/validation
-only, not implemented yet**; see [Active polling](#active-polling-not-yet-implemented)).
+Standard CANopen SDO config is split into `sdo.sniff` (passive observation)
+and `sdo.poll` (active uploads, including expedited and segmented responses).
 
 #### SDO channels (`sdo.sniff.channels[]`)
 
@@ -139,23 +138,47 @@ so there's nothing a hex catch-all would add.
 | `sdo.sniff.objects[].index` / `.sub_index` | int | Object dictionary address. |
 | `sdo.sniff.objects[].fields[]` | list | One or more fields to decode from the completed transfer's payload; see [Field reference](#field-reference). Multiple entries decode a struct from one object. |
 
-#### Active SDO polling (`sdo.poll`) - not yet implemented
+#### Active SDO polling (`sdo.poll`)
 
-| Field | Type | Description |
-|---|---|---|
-| `sdo.poll.interval` | duration | Required if `sdo.poll.objects[]` is non-empty. |
-| `sdo.poll.objects[]` | list | Same shape as `sdo.sniff.objects[]` (node_id/index/sub_index + fields[]). |
+Active polling sends CANopen upload requests for configured objects. It is
+independent of passive SDO observation. Each poll object uses the same
+`fields[]` mapping as a sniffed SDO object.
 
-Declaring `sdo.poll` entries is validated at startup but has no runtime
-effect today - the receiver does not yet initiate SDO transfers. See
-[Active polling](#active-polling-not-yet-implemented).
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `sdo.poll.mode` | string | `once` | `once` requests each object once; `interval` repeats the complete object list. |
+| `sdo.poll.interval` | duration | required for `interval` | Delay between polling cycles. |
+| `sdo.poll.timeout` | duration | `2s` | Maximum time to wait for an upload response or segmented transfer. |
+| `sdo.poll.retry` | bool | `false` | Retry a failed request with exponential backoff. |
+| `sdo.poll.backoff` | duration | `1s` | Initial retry delay. |
+| `sdo.poll.max_backoff` | duration | `1m` | Maximum retry delay. |
+| `sdo.poll.max_retries` | integer | unlimited in interval mode | Retry limit after the initial request; required when retry is enabled in once mode. |
+| `sdo.poll.objects` | list | empty | SDO objects to upload sequentially. Each entry uses the same fields as `sdo.sniff.objects[]`. |
+
+Example:
+
+```yaml
+sdo:
+  poll:
+    mode: once
+    retry: true
+    max_retries: 3
+    timeout: 2s
+    objects:
+      - node_id: 30
+        index: 0x20F0
+        sub_index: 0x11
+        fields:
+          - name: canopen.mcu.firmware
+            type: uint32
+            logs: true
+```
 
 ### Raw (non-CANopen / vendor) traffic (`raw`)
 
 Vendor/proprietary CAN traffic (e.g. a service-tool protocol) is split into
-`raw.sniff` (passive capture, implemented today) and `raw.transactions`
-(active request/response polling - **config/validation only, not
-implemented yet**; see [Active polling](#active-polling-not-yet-implemented)).
+`raw.sniff` for passive capture and `raw.transactions` for generic active
+request/response polling.
 
 #### Raw frame capture (`raw.sniff`)
 

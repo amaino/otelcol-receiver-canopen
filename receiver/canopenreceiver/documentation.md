@@ -115,6 +115,8 @@ event is attributable to a specific node.
   `canopen.sdo.subindex`/`canopen.sdo.direction`/`canopen.sdo.operation`
   (SDO object), or `canopen.raw.message` (raw message) - plus every field's
   static `attributes:`, merged in.
+  Active SDO poll responses use the same object fields and structured body
+  format as passively observed transfers.
 
 ### Raw frame capture
 
