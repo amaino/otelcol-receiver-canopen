@@ -40,7 +40,7 @@ event is attributable to a specific node.
   vendor-proprietary traffic sharing the bus (e.g. a service-tool protocol)
   so it can be decoded by a separate, downstream component.
 
-### User-configured metrics (`sdo.sniff.objects[]`, `pdo[].fields[]`, `raw.sniff.messages[].fields[]`)
+### User-configured metrics (`sdo.sniff.objects[]`, `sdo.poll.objects[]`, `pdo[].fields[]`, `raw.sniff.messages[].fields[]`)
 
 - **Type**: gauge or sum (per field's `metric_type`), named by the field's
   `name`.
@@ -124,5 +124,12 @@ event is attributable to a specific node.
   in `raw.sniff.cob_ids`.
 - **Emitted**: once per matched frame, with no protocol interpretation.
 - **Severity**: Info
+
+### Raw transactions
+
+Raw transactions use `sniff.raw.transactions[]` to send a configured request,
+wait for a matching response COB-ID, decode its configured fields, and emit
+metrics/logs. This is protocol-agnostic request/response support; vendor
+payloads and field names belong in deployment configuration.
 - **Attributes**: `canopen.cob_id` (hex string), `canopen.raw.data`
   (uppercase hexadecimal payload).

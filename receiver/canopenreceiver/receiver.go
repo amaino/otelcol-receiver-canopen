@@ -34,11 +34,12 @@ type canopenReceiver struct {
 	logsBuilder    *emit.LogsBuilder
 	buildersMu     sync.Mutex
 
-	conn   cantransport.Conn
-	cancel context.CancelFunc
-	wg     sync.WaitGroup
-	sendMu sync.Mutex
-	poller *sdoPoller
+	conn      cantransport.Conn
+	cancel    context.CancelFunc
+	wg        sync.WaitGroup
+	sendMu    sync.Mutex
+	poller    *sdoPoller
+	rawPoller *rawTransactionPoller
 
 	startOnce    sync.Once
 	shutdownOnce sync.Once
@@ -65,7 +66,7 @@ func buildSnifferConfig(cfg *Config) sniffer.Config {
 		HeartbeatEmitLog:    cfg.Heartbeat.Logs,
 		EMCYEmitMetric:      cfg.EMCY.Metrics,
 		EMCYEmitLog:         cfg.EMCY.Logs,
-		SDOObjects:          make([]sniffer.SDOObjectDef, 0, len(cfg.SDO.Sniff.Objects)),
+		SDOObjects:          make([]sniffer.SDOObjectDef, 0, len(cfg.SDO.Sniff.Objects)+len(cfg.SDO.Poll.Objects)),
 		SDOChannels:         make([]sniffer.SDOChannel, 0, len(cfg.SDO.Sniff.Channels)),
 		RawEmitMetric:       cfg.Raw.Sniff.Metrics,
 		RawEmitLog:          cfg.Raw.Sniff.Logs,
@@ -155,6 +156,11 @@ func (r *canopenReceiver) doStart(ctx context.Context) error {
 		r.wg.Add(1)
 		go r.poller.run()
 	}
+	if len(r.cfg.Raw.Transactions) > 0 {
+		r.rawPoller = newRawTransactionPoller(r, runCtx)
+		r.wg.Add(1)
+		go r.rawPoller.run()
+	}
 
 	if r.cfg.Metrics.Enabled || r.cfg.Logs.Enabled {
 		r.wg.Add(1)
@@ -230,6 +236,9 @@ func (r *canopenReceiver) dispatchLoop(ctx context.Context) {
 
 		if r.poller != nil {
 			r.poller.handleFrame(f)
+		}
+		if r.rawPoller != nil {
+			r.rawPoller.handleFrame(f)
 		}
 		r.buildersMu.Lock()
 		r.sniff.HandleFrame(f, r.metricsIfEnabled(), r.logsIfEnabled())

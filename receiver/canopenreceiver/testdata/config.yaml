@@ -20,13 +20,24 @@ sdo:
         client_to_server_cob_id: 0x611
         server_to_client_cob_id: 0x591
     objects:
-     - node_id: 30
-       index: 0x20F0
-       sub_index: 0x11
-       fields:
-         - name: canopen.mcu.firmware
-           type: uint32
-           metrics: true
+      - node_id: 30
+        index: 0x20F0
+        sub_index: 0x11
+        fields:
+          - name: canopen.mcu.firmware
+            type: uint32
+            metrics: true
+  poll:
+    mode: interval
+    interval: 1h
+    objects:
+      - node_id: 30
+        index: 0x20F0
+        sub_index: 0x11
+        fields:
+          - name: canopen.mcu.firmware
+            type: uint32
+            metrics: true
 pdo:
   - name: motor_tpdo1
     cob_id: 0x181

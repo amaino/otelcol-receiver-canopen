@@ -344,6 +344,7 @@ func TestConfig_Validate_RawTransactionOK(t *testing.T) {
 		Interval: time.Hour,
 		Response: RawResponseConfig{
 			CobID: 0x49E,
+			Match: []RawMatchByte{{ByteOffset: 0, Value: 0x08}},
 			Fields: []FieldConfig{
 				{Name: "mcu.firmware_version", BitOffset: 16, Type: codec.Uint32, Logs: true},
 			},
@@ -410,12 +411,14 @@ func TestConfig_Validate_RawTransactionSameCobIDDifferentPayloadOK(t *testing.T)
 		Interval: time.Hour,
 		Response: RawResponseConfig{
 			CobID:  0x49E,
+			Match:  []RawMatchByte{{ByteOffset: 0, Value: 0x08}},
 			Fields: []FieldConfig{{Name: "mcu.firmware_version", Type: codec.Uint32, Logs: true}},
 		},
 	}
 	other := txn
 	other.Name = "mcu.backup_checksum.driver"
 	other.Payload = []uint8{0x37, 0x80, 0x07, 0x04}
+	other.Response.Match = []RawMatchByte{{ByteOffset: 0, Value: 0x37}}
 	cfg.Raw.Transactions = []RawTransactionConfig{txn, other}
 	require.NoError(t, cfg.Validate())
 }
@@ -430,6 +433,7 @@ func TestConfig_Validate_RawTransactionDuplicateRequest(t *testing.T) {
 		Interval: time.Hour,
 		Response: RawResponseConfig{
 			CobID:  0x49E,
+			Match:  []RawMatchByte{{ByteOffset: 0, Value: 0x08}},
 			Fields: []FieldConfig{{Name: "mcu.firmware_version", Type: codec.Uint32, Logs: true}},
 		},
 	}

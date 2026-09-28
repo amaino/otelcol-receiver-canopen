@@ -12,7 +12,8 @@ An OpenTelemetry Collector receiver for CANopen traffic over Linux SocketCAN.
 
 The receiver supports passive sniffing of PDO frames, EMCY (emergency)
 messages, heartbeat/NMT state changes, and SDO traffic exchanged by other
-nodes. It also supports active SDO uploads configured under `sniff.sdo.poll`.
+nodes. It also supports active SDO uploads configured under
+`sniff.sdo.poll`.
 All behavior is driven by declarative configuration.
 
 Every field you configure from a PDO, a raw message, an SDO object, or a raw
@@ -54,11 +55,26 @@ receivers:
             server_to_client_cob_id: 0x591
         objects:
           - node_id: 1
-            index: 0x2001
-            sub_index: 0x00
+            index: 0x20F0
+            sub_index: 0x11
             fields:
-              - name: canopen.example.value
-                type: uint8
+              - name: canopen.mcu.firmware
+                type: uint32
+                metrics: true
+                logs: true
+      poll:
+        mode: once
+        retry: true
+        max_retries: 3
+        timeout: 2s
+        objects:
+          - node_id: 1
+            index: 0x20F0
+            sub_index: 0x11
+            fields:
+              - name: canopen.mcu.firmware
+                type: uint32
+                metrics: true
                 logs: true
     pdo:
       - name: motor_tpdo1
@@ -194,30 +210,32 @@ request/response polling.
 | `raw.sniff.messages[].match[].value` | int (0-255) | Expected byte value at `byte_offset`. |
 | `raw.sniff.messages[].fields[]` | list | Fields to decode from this message's payload when it matches; see [Field reference](#field-reference). Multiple entries decode a struct from one frame. Decoded fields are emitted under their own configured name/metric-or-log settings, not as `canopen.raw.frames`. |
 
+#### Active raw transactions (`raw.transactions[]`)
+
+Raw transactions provide generic request/response polling for proprietary CAN
+protocols. The receiver does not interpret the protocol; configuration defines
+the request payload, response matching, schedule, retries, and response fields.
+
+| Field | Type | Description |
+|---|---|---|
+| `name` | string | Transaction name used in emitted logs. |
+| `cob_id` | int | Request CAN COB-ID. |
+| `payload` | list | Request payload, up to 8 bytes. |
+| `mode` | string | `once` or `interval`; omitted mode infers interval when `interval` is set, otherwise once. |
+| `timeout` | duration | Response wait timeout (default `2s`). |
+| `interval` | duration | Required and positive in interval mode; omitted in once mode. |
+| `retry` | bool | Opt-in; retry failed sends or response timeouts with exponential backoff. Once-mode retries require `max_retries`. |
+| `backoff` | duration | Initial retry delay (default `1s`). |
+| `max_backoff` | duration | Maximum retry delay (default `1m`). |
+| `max_retries` | integer | Retry limit after the initial attempt; unlimited in interval mode when omitted. |
+| `response.cob_id` | int | Expected response COB-ID. |
+| `response.match[]` | list | Required byte matches for response correlation. Patterns sharing a response COB-ID must be disjoint. |
+| `response.fields[]` | list | Values decoded from the response using the field options below. |
+
 If a frame's COB-ID has one or more `raw.sniff.messages[]` entries but none of
 their `match[]` conditions are satisfied, the frame falls back to the
 generic raw-hex capture described above (if `raw.sniff.metrics` or
 `raw.sniff.logs` is set).
-
-#### Active raw requests (`raw.transactions`) - not yet implemented
-
-Each entry is a request/response poll cycle, not a fixed-rate blind
-retransmit: send the request, wait for the correlated reply (or `timeout`),
-then wait `interval` before sending the next request.
-
-| Field | Type | Description |
-|---|---|---|
-| `raw.transactions[].name` | string | Identifies the request/response transaction in logs/errors. |
-| `raw.transactions[].cob_id` | int | Where the fixed request frame would be transmitted. |
-| `raw.transactions[].payload` | list of int (1-8 bytes) | The fixed request frame's payload. |
-| `raw.transactions[].timeout` | duration | Required; how long to wait for the correlated response before giving up on that poll cycle. |
-| `raw.transactions[].interval` | duration | Required; how long to wait after a response (or timeout) before sending the next request. |
-| `raw.transactions[].response.cob_id` | int | Where the correlated reply would be expected. |
-| `raw.transactions[].response.fields[]` | list | Same shape as `raw.sniff.messages[].fields[]`. |
-
-Declaring `raw.transactions` entries is validated at startup but has no
-runtime effect today - nothing transmits the request or correlates a reply
-to it. See [Active polling](#active-polling-not-yet-implemented).
 
 ### PDOs (`pdo[]`)
 
@@ -227,14 +245,6 @@ to it. See [Active polling](#active-polling-not-yet-implemented).
 | `pdo[].name` | string | Identifies the PDO in logs/errors. |
 | `pdo[].cob_id` | int | The CAN arbitration ID this PDO is sent on. |
 | `pdo[].fields[]` | list | Fields to decode from this PDO's payload; see [Field reference](#field-reference). Multiple entries decode a struct from one frame. |
-
-### Active polling - not yet implemented
-
-`sdo.poll` and `raw.transactions` describe intended future active-request
-behavior (issuing an SDO upload, or transmitting a fixed vendor request
-frame, on an interval) and are fully validated at startup, but nothing in
-this receiver transmits or correlates a reply yet - that's a later commit.
-Configuring them today has no runtime effect beyond passing validation.
 
 ### Field reference
 
@@ -274,20 +284,11 @@ See [`documentation.md`](./documentation.md) for the built-in metrics/logs
 this receiver produces beyond user-configured signals (NMT state, EMCY
 errors), and their attributes.
 
-## Roadmap
-
-Active SDO polling and active raw requests (periodic reads of object
-dictionary entries or request/response poll cycles) are planned as
-a follow-up; `sdo.poll` and `raw.transactions` already describe their
-intended config shape (see above) but have no runtime effect yet.
-
 ## Limitations (current)
 
 - Linux SocketCAN only; other platforms fail fast at startup with a clear
   error (all other logic remains testable everywhere).
 - Classic CAN frames only (no CAN FD).
-- Sniffing (passive decode) only — `sdo.poll`/`raw.transactions` are
-  config/validation-only; no active SDO or raw requests are sent yet.
 - No EDS/DCF parsing; signals are declared explicitly in YAML.
 - No traces signal.
 

@@ -330,6 +330,7 @@ func TestReceiver_SDOUploadPollInterval(t *testing.T) {
 	defer cancel()
 	firstRequest, err := monitor.Recv(recvCtx)
 	require.NoError(t, err)
+	assert.Equal(t, uint32(0x601), firstRequest.ID)
 	bus.Inject(cantransport.Frame{ID: 0x581, Data: []byte{0x4B, 0x01, 0x20, 0, 0x34, 0x12, 0, 0}})
 
 	waitForFrameData(t, recvCtx, monitor, firstRequest.Data)
@@ -348,4 +349,49 @@ func waitForFrameData(t *testing.T, ctx context.Context, conn cantransport.Conn,
 
 func intPointer(value int) *int {
 	return &value
+}
+
+func TestReceiver_RawTransactionPoll(t *testing.T) {
+	bus := cantransport.NewFakeBus()
+	monitor, err := bus.Dial(context.Background(), "vcan0")
+	require.NoError(t, err)
+	defer monitor.Close()
+
+	cfg := createDefaultConfig().(*Config)
+	cfg.Interface = "vcan0"
+	cfg.ReadTimeout = 20 * time.Millisecond
+	cfg.Metrics.FlushInterval = 20 * time.Millisecond
+	cfg.Metrics.Enabled = false
+	cfg.Raw.Transactions = []RawTransactionConfig{{
+		Name:     "device.firmware",
+		CobID:    0x51E,
+		Payload:  []byte{0x08, 0x80},
+		Timeout:  time.Second,
+		Interval: time.Hour,
+		Response: RawResponseConfig{
+			CobID:  0x49E,
+			Match:  []RawMatchByte{{ByteOffset: 0, Value: 0x08}, {ByteOffset: 1, Value: 0x80}},
+			Fields: []FieldConfig{{Name: "device.version", BitOffset: 16, Type: codec.Uint32, Logs: true}},
+		},
+	}}
+	require.NoError(t, cfg.Validate())
+
+	set := receivertest.NewNopSettings(metadata.Type)
+	r := newCanopenReceiver(cfg, set, fakeBusDialer{bus: bus})
+	logsSink := new(consumertest.LogsSink)
+	r.logsConsumer = logsSink
+	require.NoError(t, r.Start(context.Background(), componenttest.NewNopHost()))
+	defer func() { require.NoError(t, r.Shutdown(context.Background())) }()
+
+	recvCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	request, err := monitor.Recv(recvCtx)
+	require.NoError(t, err)
+	assert.Equal(t, uint32(0x51E), request.ID)
+	assert.Equal(t, []byte{0x08, 0x80}, request.Data)
+
+	bus.Inject(cantransport.Frame{ID: 0x49E, Data: []byte{0x08, 0x80, 0x78, 0x56, 0x34, 0x12, 0, 0}})
+	require.Eventually(t, func() bool { return len(logsSink.AllLogs()) > 0 }, time.Second, 10*time.Millisecond)
+	log := logsSink.AllLogs()[0].ResourceLogs().At(0).ScopeLogs().At(0).LogRecords().At(0)
+	assert.InDelta(t, float64(0x12345678), log.Body().Double(), 1)
 }
