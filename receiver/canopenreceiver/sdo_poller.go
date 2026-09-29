@@ -154,6 +154,15 @@ func (p *sdoPoller) handleFrame(frame cantransport.Frame) {
 		return
 	}
 	if data[0] == 0x80 {
+		if len(data) < 4 {
+			p.mu.Unlock()
+			return
+		}
+		index := uint16(data[1]) | uint16(data[2])<<8
+		if index != active.object.Index || data[3] != active.object.SubIndex {
+			p.mu.Unlock()
+			return
+		}
 		p.finishLocked(active, false, fmt.Errorf("SDO abort for 0x%04X:%02X", active.object.Index, active.object.SubIndex))
 		p.mu.Unlock()
 		return

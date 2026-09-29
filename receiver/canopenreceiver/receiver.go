@@ -237,12 +237,15 @@ func (r *canopenReceiver) dispatchLoop(ctx context.Context) {
 		if r.poller != nil {
 			r.poller.handleFrame(f)
 		}
+		transactionResponse := false
 		if r.rawPoller != nil {
-			r.rawPoller.handleFrame(f)
+			transactionResponse = r.rawPoller.handleFrame(f)
 		}
-		r.buildersMu.Lock()
-		r.sniff.HandleFrame(f, r.metricsIfEnabled(), r.logsIfEnabled())
-		r.buildersMu.Unlock()
+		if !transactionResponse {
+			r.buildersMu.Lock()
+			r.sniff.HandleFrame(f, r.metricsIfEnabled(), r.logsIfEnabled())
+			r.buildersMu.Unlock()
+		}
 	}
 }
 

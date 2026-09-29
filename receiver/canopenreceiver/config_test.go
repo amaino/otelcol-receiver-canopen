@@ -87,6 +87,15 @@ func TestConfig_Validate_NoSignalEnabled(t *testing.T) {
 	require.Error(t, cfg.Validate())
 }
 
+func TestConfig_Validate_LogsOnlyRequiresPositiveFlushInterval(t *testing.T) {
+	cfg := validBaseConfig()
+	cfg.PDO = nil
+	cfg.Metrics.Enabled = false
+	cfg.Metrics.FlushInterval = 0
+	cfg.Logs.Enabled = true
+	require.ErrorContains(t, cfg.Validate(), "flush_interval must be > 0")
+}
+
 func TestConfig_Validate_BadCobID(t *testing.T) {
 	cfg := validBaseConfig()
 	cfg.PDO[0].CobID = 0
@@ -146,6 +155,19 @@ func TestConfig_Validate_SDOChannelRejectsExtendedCOBIDs(t *testing.T) {
 		NodeID: 1, ClientToServerCobID: 0x800, ServerToClientCobID: 0x581,
 	}}
 	require.Error(t, cfg.Validate())
+}
+
+func TestConfig_Validate_SDOPollRejectsMultipleChannelsForPolledNode(t *testing.T) {
+	cfg := validBaseConfig()
+	cfg.SDO.Sniff.Channels = []SDOChannelConfig{
+		{NodeID: 1, ClientToServerCobID: 0x601, ServerToClientCobID: 0x581},
+		{NodeID: 1, ClientToServerCobID: 0x611, ServerToClientCobID: 0x591},
+	}
+	cfg.SDO.Poll.Objects = []SDOObjectConfig{{
+		NodeID: 1, Index: 0x20F0, SubIndex: 0x11,
+		Fields: []FieldConfig{{Name: "firmware", Type: codec.Uint32}},
+	}}
+	require.ErrorContains(t, cfg.Validate(), "multiple channels")
 }
 
 func TestConfig_Validate_SDOObjectRequiresMetricsEnabled(t *testing.T) {
@@ -209,6 +231,82 @@ func TestConfig_Validate_FieldLogsOnlyOKForVisibleString(t *testing.T) {
 	require.NoError(t, cfg.Validate())
 }
 
+func TestConfig_Validate_SDOPollRejectsUnknownMode(t *testing.T) {
+	cfg := validBaseConfig()
+	cfg.SDO.Poll = SDOPollConfig{
+		Mode: "invalid",
+		Objects: []SDOObjectConfig{{
+			NodeID: 1, Index: 0x20F0, SubIndex: 0x11,
+			Fields: []FieldConfig{{Name: "firmware", Type: codec.Uint32}},
+		}},
+	}
+	require.ErrorContains(t, cfg.Validate(), "mode must be one of once, interval")
+}
+
+func TestConfig_Validate_SDOPollRequiresPositiveInterval(t *testing.T) {
+	cfg := validBaseConfig()
+	cfg.SDO.Poll = SDOPollConfig{
+		Mode:     "interval",
+		Interval: 0,
+		Objects: []SDOObjectConfig{{
+			NodeID: 1, Index: 0x20F0, SubIndex: 0x11,
+			Fields: []FieldConfig{{Name: "firmware", Type: codec.Uint32}},
+		}},
+	}
+	require.ErrorContains(t, cfg.Validate(), "interval must be > 0")
+}
+
+func TestConfig_Validate_SDOPollOnceRetryRequiresMaxRetries(t *testing.T) {
+	cfg := validBaseConfig()
+	cfg.SDO.Poll = SDOPollConfig{
+		Mode:  "once",
+		Retry: true,
+		Objects: []SDOObjectConfig{{
+			NodeID: 1, Index: 0x20F0, SubIndex: 0x11,
+			Fields: []FieldConfig{{Name: "firmware", Type: codec.Uint32}},
+		}},
+	}
+	require.ErrorContains(t, cfg.Validate(), "max_retries is required")
+}
+
+func TestConfig_Validate_SDOPollIntervalAllowsUnlimitedRetry(t *testing.T) {
+	cfg := validBaseConfig()
+	cfg.SDO.Poll = SDOPollConfig{
+		Mode:     "interval",
+		Interval: time.Hour,
+		Retry:    true,
+		Objects: []SDOObjectConfig{{
+			NodeID: 1, Index: 0x20F0, SubIndex: 0x11,
+			Fields: []FieldConfig{{Name: "firmware", Type: codec.Uint32}},
+		}},
+	}
+	require.NoError(t, cfg.Validate())
+}
+
+func TestConfig_Validate_SDOPollRejectsConflictingSniffMapping(t *testing.T) {
+	cfg := validBaseConfig()
+	cfg.SDO.Sniff.Objects = []SDOObjectConfig{{
+		NodeID: 1, Index: 0x20F0, SubIndex: 0x11,
+		Fields: []FieldConfig{{Name: "sniff.firmware", Type: codec.Uint32, Logs: true}},
+	}}
+	cfg.SDO.Poll.Objects = []SDOObjectConfig{{
+		NodeID: 1, Index: 0x20F0, SubIndex: 0x11,
+		Fields: []FieldConfig{{Name: "poll.firmware", Type: codec.Uint32, Logs: true}},
+	}}
+	require.ErrorContains(t, cfg.Validate(), "configuration conflicts with passive object")
+}
+
+func TestConfig_Validate_SDOPollAllowsIdenticalSniffMapping(t *testing.T) {
+	cfg := validBaseConfig()
+	object := SDOObjectConfig{
+		NodeID: 1, Index: 0x20F0, SubIndex: 0x11,
+		Fields: []FieldConfig{{Name: "firmware", Type: codec.Uint32, Logs: true}},
+	}
+	cfg.SDO.Sniff.Objects = []SDOObjectConfig{object}
+	cfg.SDO.Poll.Objects = []SDOObjectConfig{object}
+	require.NoError(t, cfg.Validate())
+}
+
 func TestConfig_Validate_RawEmitRequiresLogsEnabled(t *testing.T) {
 	cfg := validBaseConfig()
 	cfg.Logs.Enabled = false
@@ -233,6 +331,147 @@ func TestConfig_Validate_RawCobIDOK(t *testing.T) {
 	cfg.Raw.Sniff.Metrics = true
 	cfg.Raw.Sniff.Logs = true
 	cfg.Raw.Sniff.CobIDs = []uint32{0x50E, 0x48E}
+	require.NoError(t, cfg.Validate())
+}
+
+func TestConfig_Validate_RawTransactionRequiresResponseMatch(t *testing.T) {
+	cfg := validBaseConfig()
+	cfg.Raw.Transactions = []RawTransactionConfig{{
+		Name: "transaction.one", CobID: 0x501, Payload: []byte{1}, Timeout: time.Second, Interval: time.Hour,
+		Response: RawResponseConfig{
+			CobID:  0x481,
+			Fields: []FieldConfig{{Name: "value", Type: codec.Uint8}},
+		},
+	}}
+	require.ErrorContains(t, cfg.Validate(), "match must identify the expected reply")
+}
+
+func TestConfig_Validate_RawTransactionOnceNeedsNoInterval(t *testing.T) {
+	cfg := validBaseConfig()
+	cfg.Raw.Transactions = []RawTransactionConfig{{
+		Name: "transaction.once", CobID: 0x501, Payload: []byte{1}, Timeout: time.Second, Mode: "once",
+		Response: RawResponseConfig{
+			CobID:  0x481,
+			Match:  []RawMatchByte{{ByteOffset: 0, Value: 0x08}},
+			Fields: []FieldConfig{{Name: "value", Type: codec.Uint8}},
+		},
+	}}
+	require.NoError(t, cfg.Validate())
+}
+
+func TestConfig_Validate_RawTransactionIntervalModeRequiresInterval(t *testing.T) {
+	cfg := validBaseConfig()
+	cfg.Raw.Transactions = []RawTransactionConfig{{
+		Name: "transaction.interval", CobID: 0x501, Payload: []byte{1}, Timeout: time.Second, Mode: "interval",
+		Response: RawResponseConfig{
+			CobID:  0x481,
+			Match:  []RawMatchByte{{ByteOffset: 0, Value: 0x08}},
+			Fields: []FieldConfig{{Name: "value", Type: codec.Uint8}},
+		},
+	}}
+	require.ErrorContains(t, cfg.Validate(), "interval must be > 0 in interval mode")
+}
+
+func TestConfig_Validate_RawTransactionInfersIntervalModeForExistingConfig(t *testing.T) {
+	cfg := validBaseConfig()
+	cfg.Raw.Transactions = []RawTransactionConfig{{
+		Name: "transaction.legacy", CobID: 0x501, Payload: []byte{1}, Timeout: time.Second, Interval: time.Hour,
+		Response: RawResponseConfig{
+			CobID:  0x481,
+			Match:  []RawMatchByte{{ByteOffset: 0, Value: 0x08}},
+			Fields: []FieldConfig{{Name: "value", Type: codec.Uint8}},
+		},
+	}}
+	require.NoError(t, cfg.Validate())
+}
+
+func TestConfig_Validate_RawTransactionsRejectOverlappingResponseMatches(t *testing.T) {
+	cfg := validBaseConfig()
+	makeTransaction := func(name string) RawTransactionConfig {
+		return RawTransactionConfig{
+			Name: name, CobID: 0x501, Payload: []byte{1}, Timeout: time.Second, Interval: time.Hour,
+			Response: RawResponseConfig{
+				CobID:  0x481,
+				Match:  []RawMatchByte{{ByteOffset: 0, Value: 0x08}},
+				Fields: []FieldConfig{{Name: name, Type: codec.Uint8}},
+			},
+		}
+	}
+	cfg.Raw.Transactions = []RawTransactionConfig{
+		makeTransaction("transaction.one"),
+		makeTransaction("transaction.two"),
+	}
+	require.ErrorContains(t, cfg.Validate(), "response.match overlaps transaction")
+}
+
+func TestConfig_Validate_RawTransactionsAllowDisjointResponseMatches(t *testing.T) {
+	makeTransaction := func(name string, match RawMatchByte) RawTransactionConfig {
+		return RawTransactionConfig{
+			Name: name, CobID: 0x501, Payload: []byte{1}, Timeout: time.Second, Interval: time.Hour,
+			Response: RawResponseConfig{
+				CobID:  0x481,
+				Match:  []RawMatchByte{match},
+				Fields: []FieldConfig{{Name: name, Type: codec.Uint8}},
+			},
+		}
+	}
+	cfg := validBaseConfig()
+	cfg.Raw.Transactions = []RawTransactionConfig{
+		makeTransaction("transaction.one", RawMatchByte{ByteOffset: 0, Value: 0x08}),
+		makeTransaction("transaction.two", RawMatchByte{ByteOffset: 0, Value: 0x37}),
+	}
+	require.NoError(t, cfg.Validate())
+}
+
+func TestConfig_Validate_RawTransactionRejectsInvalidRetrySettings(t *testing.T) {
+	makeTransaction := func() RawTransactionConfig {
+		return RawTransactionConfig{
+			Name: "transaction.one", CobID: 0x501, Payload: []byte{1}, Timeout: time.Second, Interval: time.Hour,
+			Response: RawResponseConfig{
+				CobID:  0x481,
+				Match:  []RawMatchByte{{ByteOffset: 0, Value: 0x08}},
+				Fields: []FieldConfig{{Name: "value", Type: codec.Uint8}},
+			},
+		}
+	}
+
+	cfg := validBaseConfig()
+	negativeRetries := -1
+	transaction := makeTransaction()
+	transaction.Retry = true
+	transaction.MaxRetries = &negativeRetries
+	cfg.Raw.Transactions = []RawTransactionConfig{transaction}
+	require.ErrorContains(t, cfg.Validate(), "max_retries must be >= 0")
+
+	cfg = validBaseConfig()
+	transaction = makeTransaction()
+	transaction.Retry = true
+	transaction.Backoff = -time.Second
+	cfg.Raw.Transactions = []RawTransactionConfig{transaction}
+	require.ErrorContains(t, cfg.Validate(), "backoff values must be >= 0")
+}
+
+func TestConfig_Validate_RawTransactionOnceRetryRequiresMaxRetries(t *testing.T) {
+	cfg := validBaseConfig()
+	cfg.Raw.Transactions = []RawTransactionConfig{{
+		Name: "transaction.once", CobID: 0x501, Payload: []byte{1}, Timeout: time.Second, Mode: "once", Retry: true,
+		Response: RawResponseConfig{
+			CobID: 0x481, Match: []RawMatchByte{{ByteOffset: 0, Value: 0x08}},
+			Fields: []FieldConfig{{Name: "value", Type: codec.Uint8}},
+		},
+	}}
+	require.ErrorContains(t, cfg.Validate(), "max_retries is required")
+}
+
+func TestConfig_Validate_RawTransactionIntervalAllowsUnlimitedRetry(t *testing.T) {
+	cfg := validBaseConfig()
+	cfg.Raw.Transactions = []RawTransactionConfig{{
+		Name: "transaction.interval", CobID: 0x501, Payload: []byte{1}, Timeout: time.Second, Mode: "interval", Interval: time.Hour, Retry: true,
+		Response: RawResponseConfig{
+			CobID: 0x481, Match: []RawMatchByte{{ByteOffset: 0, Value: 0x08}},
+			Fields: []FieldConfig{{Name: "value", Type: codec.Uint8}},
+		},
+	}}
 	require.NoError(t, cfg.Validate())
 }
 

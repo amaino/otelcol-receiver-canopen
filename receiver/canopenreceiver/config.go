@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"reflect"
 	"time"
 
 	"go.opentelemetry.io/collector/component"
@@ -214,7 +215,7 @@ func (s *SDOObjectConfig) validate(scope string) error {
 }
 
 // SDOSniffConfig configures passive observation of SDO frames exchanged by
-// other nodes.
+// other nodes. It never initiates an SDO transfer.
 type SDOSniffConfig struct {
 	Channels []SDOChannelConfig `mapstructure:"channels"`
 	Objects  []SDOObjectConfig  `mapstructure:"objects"`
@@ -237,22 +238,25 @@ func (p *SDOPollConfig) validate() error {
 		p.Mode = "once"
 	}
 	if p.Mode != "once" && p.Mode != "interval" {
-		return fmt.Errorf("sniff.sdo.poll: mode must be one of once, interval")
+		return errors.New("sdo.poll: mode must be one of once, interval")
 	}
 	if p.Mode == "interval" && p.Interval <= 0 {
-		return errors.New("sniff.sdo.poll: interval must be > 0 in interval mode")
+		return errors.New("sdo.poll: interval must be > 0 in interval mode")
 	}
 	if p.Timeout < 0 {
-		return errors.New("sniff.sdo.poll: timeout must be >= 0")
+		return errors.New("sdo.poll: timeout must be >= 0")
 	}
 	if p.Backoff < 0 || p.MaxBackoff < 0 {
-		return errors.New("sniff.sdo.poll: backoff values must be >= 0")
+		return errors.New("sdo.poll: backoff values must be >= 0")
 	}
 	if p.MaxBackoff > 0 && p.Backoff > p.MaxBackoff {
-		return errors.New("sniff.sdo.poll: max_backoff must be >= backoff")
+		return errors.New("sdo.poll: max_backoff must be >= backoff")
 	}
 	if p.MaxRetries != nil && *p.MaxRetries < 0 {
-		return errors.New("sniff.sdo.poll: max_retries must be >= 0")
+		return errors.New("sdo.poll: max_retries must be >= 0")
+	}
+	if p.Mode == "once" && p.Retry && p.MaxRetries == nil {
+		return errors.New("sdo.poll: max_retries is required when retry is enabled in once mode")
 	}
 	seen := make(map[string]struct{}, len(p.Objects))
 	for i := range p.Objects {
@@ -261,9 +265,30 @@ func (p *SDOPollConfig) validate() error {
 		}
 		key := fmt.Sprintf("%d:%04X:%02X", p.Objects[i].NodeID, p.Objects[i].Index, p.Objects[i].SubIndex)
 		if _, duplicate := seen[key]; duplicate {
-			return fmt.Errorf("sniff.sdo.poll.objects: duplicate object %s", key)
+			return fmt.Errorf("sdo.poll.objects: duplicate object %s", key)
 		}
 		seen[key] = struct{}{}
+	}
+	return nil
+}
+
+// validatePDOs checks a list of PDOConfig for internal validity and
+// duplicate names/COB-IDs.
+func validatePDOs(pdos []PDOConfig) error {
+	seen := make(map[string]struct{}, len(pdos))
+	cobIDs := make(map[uint32]struct{}, len(pdos))
+	for i := range pdos {
+		if err := pdos[i].validate(); err != nil {
+			return err
+		}
+		if _, dup := seen[pdos[i].Name]; dup {
+			return fmt.Errorf("pdo: duplicate pdo name %q", pdos[i].Name)
+		}
+		seen[pdos[i].Name] = struct{}{}
+		if _, dup := cobIDs[pdos[i].CobID]; dup {
+			return fmt.Errorf("pdo: duplicate cob_id 0x%X", pdos[i].CobID)
+		}
+		cobIDs[pdos[i].CobID] = struct{}{}
 	}
 	return nil
 }
@@ -326,7 +351,38 @@ func (s *SDOConfig) validate() error {
 	if err := s.Sniff.validate(); err != nil {
 		return err
 	}
-	return s.Poll.validate()
+	if err := s.Poll.validate(); err != nil {
+		return err
+	}
+	if len(s.Poll.Objects) > 0 {
+		polledNodes := make(map[uint8]struct{}, len(s.Poll.Objects))
+		for _, object := range s.Poll.Objects {
+			polledNodes[object.NodeID] = struct{}{}
+		}
+		channelCounts := make(map[uint8]int, len(s.Sniff.Channels))
+		for _, channel := range s.Sniff.Channels {
+			channelCounts[channel.NodeID]++
+		}
+		for nodeID := range polledNodes {
+			if channelCounts[nodeID] > 1 {
+				return fmt.Errorf("sniff.sdo.channels: node_id %d has multiple channels and cannot be polled unambiguously", nodeID)
+			}
+		}
+	}
+	passiveObjects := make(map[string]SDOObjectConfig, len(s.Sniff.Objects))
+	for _, object := range s.Sniff.Objects {
+		passiveObjects[sdoObjectKey(object)] = object
+	}
+	for i, object := range s.Poll.Objects {
+		if passive, exists := passiveObjects[sdoObjectKey(object)]; exists && !reflect.DeepEqual(passive.Fields, object.Fields) {
+			return fmt.Errorf("sniff.sdo.poll.objects[%d]: configuration conflicts with passive object %s", i, sdoObjectKey(object))
+		}
+	}
+	return nil
+}
+
+func sdoObjectKey(object SDOObjectConfig) string {
+	return fmt.Sprintf("%d:%04X:%02X", object.NodeID, object.Index, object.SubIndex)
 }
 
 // RawMatchByte is a byte-equality condition used to discriminate between
@@ -359,6 +415,16 @@ type RawMessageConfig struct {
 	CobID  uint32         `mapstructure:"cob_id"`
 	Match  []RawMatchByte `mapstructure:"match"`
 	Fields []FieldConfig  `mapstructure:"fields"`
+}
+
+func (t RawTransactionConfig) effectiveMode() string {
+	if t.Mode != "" {
+		return t.Mode
+	}
+	if t.Interval > 0 {
+		return "interval"
+	}
+	return "once"
 }
 
 func (r *RawMessageConfig) validate() error {
@@ -532,16 +598,6 @@ func (r *RawTransactionConfig) validate() error {
 	return r.Response.validate(fmt.Sprintf("raw transaction %q", r.Name))
 }
 
-func (r RawTransactionConfig) effectiveMode() string {
-	if r.Mode != "" {
-		return r.Mode
-	}
-	if r.Interval > 0 {
-		return "interval"
-	}
-	return "once"
-}
-
 // RawConfig groups non-CANopen (vendor/proprietary) CAN traffic config.
 type RawConfig struct {
 	Sniff        RawFrameConfig         `mapstructure:"sniff"`
@@ -591,27 +647,6 @@ func rawMatchesCanOverlap(left, right []RawMatchByte) bool {
 	return true
 }
 
-// validatePDOs checks a list of PDOConfig for internal validity and
-// duplicate names/COB-IDs.
-func validatePDOs(pdos []PDOConfig) error {
-	seen := make(map[string]struct{}, len(pdos))
-	cobIDs := make(map[uint32]struct{}, len(pdos))
-	for i := range pdos {
-		if err := pdos[i].validate(); err != nil {
-			return err
-		}
-		if _, dup := seen[pdos[i].Name]; dup {
-			return fmt.Errorf("pdo: duplicate pdo name %q", pdos[i].Name)
-		}
-		seen[pdos[i].Name] = struct{}{}
-		if _, dup := cobIDs[pdos[i].CobID]; dup {
-			return fmt.Errorf("pdo: duplicate cob_id 0x%X", pdos[i].CobID)
-		}
-		cobIDs[pdos[i].CobID] = struct{}{}
-	}
-	return nil
-}
-
 // MetricsConfig configures the metrics signal of this receiver.
 type MetricsConfig struct {
 	Enabled       bool          `mapstructure:"enabled"`
@@ -619,11 +654,8 @@ type MetricsConfig struct {
 }
 
 func (m *MetricsConfig) validate() error {
-	if !m.Enabled {
-		return nil
-	}
 	if m.FlushInterval <= 0 {
-		return errors.New("metrics: flush_interval must be > 0 when metrics is enabled")
+		return errors.New("metrics: flush_interval must be > 0 when metrics or logs are enabled")
 	}
 	return nil
 }

@@ -495,5 +495,6 @@ func (s *Sniffer) emitTypedSDO(event sdoobserver.Event, metrics *emit.MetricsBui
 		}
 		body := fmt.Sprintf("canopen SDO object 0x%04X:%02X decoded", event.Index, event.SubIndex)
 		s.emitFields(object.Fields, event.Data, attrs, contextAttrs, body, metrics, logs)
+		return
 	}
 }

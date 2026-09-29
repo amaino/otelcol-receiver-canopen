@@ -221,16 +221,21 @@ the request payload, response matching, schedule, retries, and response fields.
 | `name` | string | Transaction name used in emitted logs. |
 | `cob_id` | int | Request CAN COB-ID. |
 | `payload` | list | Request payload, up to 8 bytes. |
-| `mode` | string | `once` or `interval`; omitted mode infers interval when `interval` is set, otherwise once. |
+| `mode` | string | `once` or `interval`; omitted mode infers `interval` when `interval` is set, otherwise `once`. |
 | `timeout` | duration | Response wait timeout (default `2s`). |
-| `interval` | duration | Required and positive in interval mode; omitted in once mode. |
-| `retry` | bool | Opt-in; retry failed sends or response timeouts with exponential backoff. Once-mode retries require `max_retries`. |
+| `interval` | duration | Required and positive in `interval` mode; omitted in `once` mode. |
+| `retry` | bool | Opt-in; retry failed sends or response timeouts with exponential backoff. |
 | `backoff` | duration | Initial retry delay (default `1s`). |
 | `max_backoff` | duration | Maximum retry delay (default `1m`). |
-| `max_retries` | integer | Retry limit after the initial attempt; unlimited in interval mode when omitted. |
+| `max_retries` | integer | Retries after the initial attempt; required with `retry: true` in once mode. |
 | `response.cob_id` | int | Expected response COB-ID. |
-| `response.match[]` | list | Required byte matches for response correlation. Patterns sharing a response COB-ID must be disjoint. |
+| `response.match[]` | list | Required byte matches for response correlation. Patterns for transactions sharing a response COB-ID must be disjoint. |
 | `response.fields[]` | list | Values decoded from the response using the field options below. |
+
+Failed attempts produce a warning with the transaction, request/response COB-IDs,
+attempt number, cause, and scheduled backoff. Exhausted retries produce a final
+warning; recovery after retries produces one info log. Successful first attempts
+are not logged individually.
 
 If a frame's COB-ID has one or more `raw.sniff.messages[]` entries but none of
 their `match[]` conditions are satisfied, the frame falls back to the
