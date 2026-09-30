@@ -13,52 +13,45 @@ receivers:
       flush_interval: 10s
     logs:
       enabled: true
-    sniff:
-      enabled: true
-      heartbeat:
-        metrics: true
-        logs: true
-      emcy:
-        metrics: true
-        logs: true
-      sdo:
+    heartbeat:
+      metrics: true
+      logs: true
+    emcy:
+      metrics: true
+      logs: true
+    sdo:
+      sniff:
         channels:
           - node_id: 1
             client_to_server_cob_id: 0x601
             server_to_client_cob_id: 0x581
-        raw:
-          metrics: true
-          logs: true
-          filters:
-            - node_id: 1
-              index: 0x2001
-              sub_index: 0x00
         objects:
           - node_id: 1
             index: 0x20F0
             sub_index: 0x11
-            name: canopen.mcu.firmware
-            type: uint32
+            fields:
+              - name: canopen.mcu.firmware
+                type: uint32
+                metrics: true
+                logs: true
+                metric_type: gauge
+                attributes:
+                  source: sdo
+    pdo:
+      - name: motor_tpdo1
+        cob_id: 0x181
+        fields:
+          - name: canopen.motor.speed
+            bit_offset: 0
+            type: int16
+            scale: 0.1
+            offset: 0
+            unit: rpm
             metrics: true
             logs: true
             metric_type: gauge
             attributes:
-              source: sdo
-      pdos:
-        - name: motor_tpdo1
-          cob_id: 0x181
-          signals:
-            - name: canopen.motor.speed
-              bit_offset: 0
-              type: int16
-              scale: 0.1
-              offset: 0
-              unit: rpm
-              metrics: true
-              logs: true
-              metric_type: gauge
-              attributes:
-                axis: x
+              axis: x
 
 processors:
   memory_limiter:

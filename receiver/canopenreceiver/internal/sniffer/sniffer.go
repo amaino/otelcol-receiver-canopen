@@ -57,11 +57,11 @@ func (s NMTState) String() string {
 	}
 }
 
-// PDOSignal binds a decoded value's destination (metric or log) to its
-// SignalConfig-derived decode parameters. Kept independent of the receiver
+// Field binds a decoded value's destination (metric or log) to its
+// FieldConfig-derived decode parameters. Kept independent of the receiver
 // package's config types so this package has no import cycle; the receiver
 // builds these from config.
-type PDOSignal struct {
+type Field struct {
 	Name       string
 	BitOffset  int
 	Type       codec.DataType
@@ -75,34 +75,21 @@ type PDOSignal struct {
 	Attributes map[string]any
 }
 
-// PDODef is a configured PDO (fixed COB-ID) with its signals to decode.
+// PDODef is a configured PDO (fixed COB-ID) with its fields to decode.
 type PDODef struct {
-	Name    string
-	CobID   uint32
-	Signals []PDOSignal
+	Name   string
+	CobID  uint32
+	Fields []Field
 }
 
-// SDOFilter selects passively observed SDO frames. Unset fields are wildcards.
-type SDOFilter struct {
-	NodeID   *uint8
-	Index    *uint16
-	SubIndex *uint8
-}
-
+// SDOObjectDef identifies one SDO object (node/index/sub-index) and its
+// fields to decode from the completed transfer payload. Multiple Fields
+// decode a struct from one object.
 type SDOObjectDef struct {
-	NodeID     uint8
-	Index      uint16
-	SubIndex   uint8
-	Name       string
-	Type       codec.DataType
-	ByteLen    int
-	Scale      float64
-	Offset     float64
-	Unit       string
-	EmitMetric bool
-	EmitLog    bool
-	MetricSum  bool
-	Attributes map[string]any
+	NodeID   uint8
+	Index    uint16
+	SubIndex uint8
+	Fields   []Field
 }
 
 // SDOChannel identifies one configured SDO client/server COB-ID pair.
@@ -122,9 +109,9 @@ type RawMatch struct {
 // RawMessageDef declares a decodable field layout for raw frames on a given
 // COB-ID, optionally narrowed by Match conditions (all ANDed).
 type RawMessageDef struct {
-	Name    string
-	Match   []RawMatch
-	Signals []PDOSignal
+	Name   string
+	Match  []RawMatch
+	Fields []Field
 }
 
 func (d RawMessageDef) matches(data []byte) bool {
@@ -145,15 +132,12 @@ type Config struct {
 	HeartbeatEmitLog    bool
 	EMCYEmitMetric      bool
 	EMCYEmitLog         bool
-	SDOEmitMetric       bool
-	SDOEmitLog          bool
-	SDOFilters          []SDOFilter
 	SDOObjects          []SDOObjectDef
 	SDOChannels         []SDOChannel
 	// RawEmitMetric/RawEmitLog control emission for frames matched by
 	// RawCobIDs. When a matching COB-ID has one or more RawMessages
 	// entries whose Match conditions are satisfied, the frame is decoded
-	// into named signals instead of being emitted as an undifferentiated
+	// into named fields instead of being emitted as an undifferentiated
 	// hex payload.
 	RawEmitMetric bool
 	RawEmitLog    bool
@@ -292,90 +276,83 @@ func (s *Sniffer) handleRaw(f cantransport.Frame, metrics *emit.MetricsBuilder, 
 	}
 }
 
-// handleRawMessage decodes a raw frame's declared signals, exactly like
-// handlePDO, so fixed-layout vendor protocols don't need a bespoke
-// processor.
-func (s *Sniffer) handleRawMessage(msg RawMessageDef, f cantransport.Frame, metrics *emit.MetricsBuilder, logs *emit.LogsBuilder) {
-	for _, sig := range msg.Signals {
-		v, err := codec.Decode(f.Data, sig.Type, sig.BitOffset, sig.ByteLen)
+// emitFields decodes and emits every field in fields from data. Metrics are
+// emitted per field, one instrument each, exactly as before. Logs are
+// grouped: if any field requests logs, exactly one log record is emitted for
+// the whole group. A single logged field uses its decoded value directly as
+// the body; multiple logged fields use one map body keyed by field name.
+// contextAttrs/body identify the source (a PDO, raw message, or SDO object)
+// and are added once.
+func (s *Sniffer) emitFields(fields []Field, data []byte, resourceAttrs map[string]string, contextAttrs map[string]any, body string, metrics *emit.MetricsBuilder, logs *emit.LogsBuilder) {
+	bodyMap := make(map[string]any, len(fields))
+	logAttrs := make(map[string]any, len(contextAttrs))
+	for k, v := range contextAttrs {
+		logAttrs[k] = v
+	}
+	haveLog := false
+	for _, field := range fields {
+		v, err := codec.Decode(data, field.Type, field.BitOffset, field.ByteLen)
 		if err != nil {
-			continue // malformed/short frame for this signal; skip silently
+			continue // malformed/short frame for this field; skip silently
 		}
-		value := codec.ApplyScale(v, sig.Scale, sig.Offset)
-		attrs := s.resourceAttrs()
-		attrs["canopen.cob_id"] = fmt.Sprintf("0x%03X", f.ID)
-		if sig.EmitMetric && metrics != nil {
+		if field.EmitMetric && metrics != nil {
 			kind := emit.KindGauge
-			if sig.MetricSum {
+			if field.MetricSum {
 				kind = emit.KindSum
 			}
 			metrics.Add(emit.MetricPoint{
-				ResourceAttrs: attrs,
-				Name:          sig.Name,
-				Unit:          sig.Unit,
+				ResourceAttrs: resourceAttrs,
+				Name:          field.Name,
+				Unit:          field.Unit,
 				Kind:          kind,
-				Value:         value,
-				Attributes:    sig.Attributes,
+				Value:         codec.ApplyScale(v, field.Scale, field.Offset),
+				Attributes:    field.Attributes,
 			})
 		}
-		if sig.EmitLog && logs != nil {
-			logAttrs := map[string]any{
-				"canopen.raw.message":  msg.Name,
-				"canopen.signal.name":  sig.Name,
-				"canopen.signal.value": value,
+		if field.EmitLog && logs != nil {
+			haveLog = true
+			bodyMap[field.Name] = v.BodyValue(field.Scale, field.Offset)
+			for k, attr := range field.Attributes {
+				logAttrs[k] = attr
 			}
-			for k, v := range sig.Attributes {
-				logAttrs[k] = v
-			}
-			logs.Add(emit.LogRecord{
-				ResourceAttrs: attrs,
-				Severity:      plog.SeverityNumberInfo,
-				Body:          fmt.Sprintf("canopen raw message %s signal %s = %v", msg.Name, sig.Name, value),
-				Attributes:    logAttrs,
-			})
 		}
+	}
+	if haveLog {
+		record := emit.LogRecord{
+			ResourceAttrs: resourceAttrs,
+			Severity:      plog.SeverityNumberInfo,
+			Body:          body,
+			Attributes:    logAttrs,
+		}
+		if len(bodyMap) == 1 {
+			for _, value := range bodyMap {
+				record.BodyValue = value
+			}
+		} else {
+			record.BodyMap = bodyMap
+		}
+		logs.Add(record)
 	}
 }
 
+// handleRawMessage decodes a raw frame's declared fields, exactly like
+// handlePDO, so fixed-layout vendor protocols don't need a bespoke
+// processor.
+func (s *Sniffer) handleRawMessage(msg RawMessageDef, f cantransport.Frame, metrics *emit.MetricsBuilder, logs *emit.LogsBuilder) {
+	attrs := s.resourceAttrs()
+	attrs["canopen.cob_id"] = fmt.Sprintf("0x%03X", f.ID)
+	s.emitFields(msg.Fields, f.Data, attrs,
+		map[string]any{"canopen.raw.message": msg.Name},
+		fmt.Sprintf("canopen raw message %s decoded", msg.Name),
+		metrics, logs)
+}
+
 func (s *Sniffer) handlePDO(pdo PDODef, f cantransport.Frame, metrics *emit.MetricsBuilder, logs *emit.LogsBuilder) {
-	for _, sig := range pdo.Signals {
-		v, err := codec.Decode(f.Data, sig.Type, sig.BitOffset, sig.ByteLen)
-		if err != nil {
-			continue // malformed/short frame for this signal; skip silently
-		}
-		value := codec.ApplyScale(v, sig.Scale, sig.Offset)
-		attrs := s.resourceAttrs()
-		if sig.EmitMetric && metrics != nil {
-			kind := emit.KindGauge
-			if sig.MetricSum {
-				kind = emit.KindSum
-			}
-			metrics.Add(emit.MetricPoint{
-				ResourceAttrs: attrs,
-				Name:          sig.Name,
-				Unit:          sig.Unit,
-				Kind:          kind,
-				Value:         value,
-				Attributes:    sig.Attributes,
-			})
-		}
-		if sig.EmitLog && logs != nil {
-			logAttrs := map[string]any{
-				"canopen.pdo.name":     pdo.Name,
-				"canopen.signal.name":  sig.Name,
-				"canopen.signal.value": value,
-			}
-			for k, v := range sig.Attributes {
-				logAttrs[k] = v
-			}
-			logs.Add(emit.LogRecord{
-				ResourceAttrs: attrs,
-				Severity:      plog.SeverityNumberInfo,
-				Body:          fmt.Sprintf("canopen pdo %s signal %s = %v", pdo.Name, sig.Name, value),
-				Attributes:    logAttrs,
-			})
-		}
-	}
+	attrs := s.resourceAttrs()
+	s.emitFields(pdo.Fields, f.Data, attrs,
+		map[string]any{"canopen.pdo.name": pdo.Name},
+		fmt.Sprintf("canopen pdo %s decoded", pdo.Name),
+		metrics, logs)
 }
 
 func (s *Sniffer) handleHeartbeat(nodeID uint8, f cantransport.Frame, metrics *emit.MetricsBuilder, logs *emit.LogsBuilder) {
@@ -486,52 +463,13 @@ func (s *Sniffer) handleEMCY(nodeID uint8, f cantransport.Frame, logs *emit.Logs
 
 // handleSDO observes, but never participates in, SDO frames exchanged by
 // other CANopen devices on the bus. It emits only completed transfers and
-// aborts, after reconstructing segmented payloads where required.
+// aborts, after reconstructing segmented payloads where required. Only
+// explicitly declared SDOObjects are decoded/emitted - there is no generic
+// undecoded fallback; declare the object's fields to see its data.
 func (s *Sniffer) handleSDO(channelKey uint32, nodeID uint8, direction sdoobserver.Direction, f cantransport.Frame, metrics *emit.MetricsBuilder, logs *emit.LogsBuilder) {
 	event, err := s.sdo.ObserveOnChannel(channelKey, nodeID, direction, f.Data)
 	if err != nil || event == nil {
 		return
-	}
-	if !s.matchesSDOFilter(event.NodeID, event.Index, event.SubIndex) {
-		s.emitTypedSDO(*event, metrics, logs)
-		return
-	}
-	attrs := s.resourceAttrs()
-	attrs["canopen.node_id"] = fmt.Sprintf("%d", event.NodeID)
-	eventAttrs := map[string]any{
-		"canopen.sdo.direction": string(event.Direction),
-		"canopen.sdo.operation": event.Operation,
-		"canopen.sdo.index":     fmt.Sprintf("0x%04X", event.Index),
-		"canopen.sdo.subindex":  fmt.Sprintf("0x%02X", event.SubIndex),
-	}
-	logAttrs := map[string]any{
-		"canopen.node_id":       int(event.NodeID),
-		"canopen.sdo.direction": string(event.Direction),
-		"canopen.sdo.operation": event.Operation,
-		"canopen.sdo.index":     int(event.Index),
-		"canopen.sdo.subindex":  int(event.SubIndex),
-		"canopen.sdo.data":      fmt.Sprintf("%X", event.Data),
-	}
-	if event.AbortCode != nil {
-		eventAttrs["canopen.sdo.abort_code"] = fmt.Sprintf("0x%08X", *event.AbortCode)
-		logAttrs["canopen.sdo.abort_code"] = fmt.Sprintf("0x%08X", *event.AbortCode)
-	}
-	if s.cfg.SDOEmitMetric && metrics != nil {
-		metrics.Add(emit.MetricPoint{
-			ResourceAttrs: attrs,
-			Name:          "canopen.sdo.transfers",
-			Kind:          emit.KindSum,
-			Value:         1,
-			Attributes:    eventAttrs,
-		})
-	}
-	if s.cfg.SDOEmitLog && logs != nil {
-		logs.Add(emit.LogRecord{
-			ResourceAttrs: attrs,
-			Severity:      plog.SeverityNumberInfo,
-			Body:          fmt.Sprintf("canopen SDO %s %s on node %d (0x%04X:%02X)", event.Direction, event.Operation, event.NodeID, event.Index, event.SubIndex),
-			Attributes:    logAttrs,
-		})
 	}
 	s.emitTypedSDO(*event, metrics, logs)
 }
@@ -544,62 +482,18 @@ func (s *Sniffer) emitTypedSDO(event sdoobserver.Event, metrics *emit.MetricsBui
 		if object.NodeID != event.NodeID || object.Index != event.Index || object.SubIndex != event.SubIndex {
 			continue
 		}
-		decoded, err := codec.Decode(event.Data, object.Type, 0, object.ByteLen)
-		if err != nil {
-			continue
-		}
-		value := codec.ApplyScale(decoded, object.Scale, object.Offset)
 		attrs := s.resourceAttrs()
 		attrs["canopen.node_id"] = fmt.Sprintf("%d", event.NodeID)
 		attrs["canopen.sdo.index"] = fmt.Sprintf("0x%04X", event.Index)
 		attrs["canopen.sdo.subindex"] = fmt.Sprintf("0x%02X", event.SubIndex)
-		if object.EmitMetric && metrics != nil {
-			kind := emit.KindGauge
-			if object.MetricSum {
-				kind = emit.KindSum
-			}
-			metrics.Add(emit.MetricPoint{
-				ResourceAttrs: attrs, Name: object.Name, Unit: object.Unit,
-				Kind: kind, Value: value, Attributes: object.Attributes,
-			})
+		contextAttrs := map[string]any{
+			"canopen.node_id":       int(event.NodeID),
+			"canopen.sdo.index":     int(event.Index),
+			"canopen.sdo.subindex":  int(event.SubIndex),
+			"canopen.sdo.direction": string(event.Direction),
+			"canopen.sdo.operation": event.Operation,
 		}
-		if object.EmitLog && logs != nil {
-			logAttrs := map[string]any{
-				"canopen.node_id":       int(event.NodeID),
-				"canopen.sdo.index":     int(event.Index),
-				"canopen.sdo.subindex":  int(event.SubIndex),
-				"canopen.sdo.direction": string(event.Direction),
-				"canopen.sdo.operation": event.Operation,
-				"canopen.signal.name":   object.Name,
-				"canopen.signal.value":  value,
-			}
-			for key, attr := range object.Attributes {
-				logAttrs[key] = attr
-			}
-			logs.Add(emit.LogRecord{
-				ResourceAttrs: attrs, Severity: plog.SeverityNumberInfo,
-				Body:       fmt.Sprintf("canopen SDO object 0x%04X:%02X %s = %v", event.Index, event.SubIndex, object.Name, value),
-				Attributes: logAttrs,
-			})
-		}
+		body := fmt.Sprintf("canopen SDO object 0x%04X:%02X decoded", event.Index, event.SubIndex)
+		s.emitFields(object.Fields, event.Data, attrs, contextAttrs, body, metrics, logs)
 	}
-}
-
-func (s *Sniffer) matchesSDOFilter(nodeID uint8, index uint16, subIndex uint8) bool {
-	if len(s.cfg.SDOFilters) == 0 {
-		return true
-	}
-	for _, filter := range s.cfg.SDOFilters {
-		if filter.NodeID != nil && *filter.NodeID != nodeID {
-			continue
-		}
-		if filter.Index != nil && *filter.Index != index {
-			continue
-		}
-		if filter.SubIndex != nil && *filter.SubIndex != subIndex {
-			continue
-		}
-		return true
-	}
-	return false
 }

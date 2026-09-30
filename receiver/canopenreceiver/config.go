@@ -1,7 +1,7 @@
 // Package canopenreceiver implements an OpenTelemetry Collector receiver for
 // CANopen traffic over Linux SocketCAN. This version supports passive
 // sniffing of standard SDO (including segmented transfers), PDO/EMCY/heartbeat
-// traffic, and declarative raw frames. Configuration controls which signals
+// traffic, and declarative raw frames. Configuration controls which fields
 // are decoded and whether each is emitted as a metric, a log, or both.
 // Active SDO polling is added in a later commit.
 package canopenreceiver
@@ -35,16 +35,20 @@ func (t MetricType) validate() error {
 	}
 }
 
-// SignalConfig describes how to decode and emit a single value extracted
-// from a CAN frame or completed SDO payload.
-type SignalConfig struct {
-	// Name is the metric name (metric emission) or log record attribute
-	// "canopen.signal.name" value (log emission). Must be unique within its
-	// containing scope (a PDO's signal list).
+// FieldConfig describes how to decode and emit a single named value
+// extracted from a CAN frame or completed SDO payload. Declaring several
+// FieldConfig entries against one payload (a PDO, a raw message, a
+// completed SDO transfer, or a raw transaction's response) decodes a
+// struct - e.g. a multi-field CANopen record - one FieldConfig per member.
+type FieldConfig struct {
+	// Name is the metric name (metric emission), and the key this field's
+	// value is stored under in the structured log body map (log
+	// emission). Must be unique within its containing scope (e.g. one
+	// PDO's field list).
 	Name string `mapstructure:"name"`
 
 	// BitOffset is the 0-based, LSB-first bit offset into the frame payload
-	// where this signal starts.
+	// where this field starts.
 	BitOffset int `mapstructure:"bit_offset"`
 
 	// Type is the CANopen data type used to interpret the bits/bytes at
@@ -56,7 +60,7 @@ type SignalConfig struct {
 	ByteLen int `mapstructure:"byte_len"`
 
 	// Scale and Offset apply a linear transform (value*Scale + Offset) to
-	// numeric signals before emission. Scale defaults to 1 when zero.
+	// numeric fields before emission. Scale defaults to 1 when zero.
 	Scale  float64 `mapstructure:"scale"`
 	Offset float64 `mapstructure:"offset"`
 
@@ -72,13 +76,13 @@ type SignalConfig struct {
 
 	// Attributes are additional static resource/datapoint attributes
 	// attached to every emitted metric data point / log record for this
-	// signal. Values may be strings, bools, or numbers; numeric YAML
+	// field. Values may be strings, bools, or numbers; numeric YAML
 	// scalars are preserved as numeric OTLP attributes (see
 	// validateStaticAttributes and emit.putAttribute).
 	Attributes map[string]any `mapstructure:"attributes"`
 }
 
-func (s *SignalConfig) validate(scope string) error {
+func (s *FieldConfig) validate(scope string) error {
 	if s.Name == "" {
 		return fmt.Errorf("%s: name must not be empty", scope)
 	}
@@ -94,6 +98,9 @@ func (s *SignalConfig) validate(scope string) error {
 		}
 		if s.BitOffset%8 != 0 {
 			return fmt.Errorf("%s %q: bit_offset must be byte-aligned for type %q", scope, s.Name, s.Type)
+		}
+		if s.Metrics {
+			return fmt.Errorf("%s %q: metrics is not supported for type %q; use logs instead", scope, s.Name, s.Type)
 		}
 	}
 	if err := s.MetricType.validate(); err != nil {
@@ -129,14 +136,15 @@ func validateStaticAttributes(scope string, attrs map[string]any) error {
 }
 
 // PDOConfig describes a single PDO (or any other frame identified by a fixed
-// COB-ID) to decode when sniffing is enabled.
+// COB-ID) to decode.
 type PDOConfig struct {
 	// Name identifies this PDO definition in logs/errors.
 	Name string `mapstructure:"name"`
 	// CobID is the CAN arbitration ID (COB-ID) this PDO is transmitted on.
 	CobID uint32 `mapstructure:"cob_id"`
-	// Signals are the values to decode from this PDO's payload.
-	Signals []SignalConfig `mapstructure:"signals"`
+	// Fields are the values to decode from this PDO's payload. Multiple
+	// entries decode a struct from one frame.
+	Fields []FieldConfig `mapstructure:"fields"`
 }
 
 func (p *PDOConfig) validate() error {
@@ -146,18 +154,18 @@ func (p *PDOConfig) validate() error {
 	if p.CobID == 0 || p.CobID > 0x1FFFFFFF {
 		return fmt.Errorf("pdo %q: cob_id 0x%X out of range", p.Name, p.CobID)
 	}
-	if len(p.Signals) == 0 {
-		return fmt.Errorf("pdo %q: must declare at least one signal", p.Name)
+	if len(p.Fields) == 0 {
+		return fmt.Errorf("pdo %q: must declare at least one field", p.Name)
 	}
-	seen := make(map[string]struct{}, len(p.Signals))
-	for i := range p.Signals {
-		if err := p.Signals[i].validate(fmt.Sprintf("pdo %q signal", p.Name)); err != nil {
+	seen := make(map[string]struct{}, len(p.Fields))
+	for i := range p.Fields {
+		if err := p.Fields[i].validate(fmt.Sprintf("pdo %q field", p.Name)); err != nil {
 			return err
 		}
-		if _, dup := seen[p.Signals[i].Name]; dup {
-			return fmt.Errorf("pdo %q: duplicate signal name %q", p.Name, p.Signals[i].Name)
+		if _, dup := seen[p.Fields[i].Name]; dup {
+			return fmt.Errorf("pdo %q: duplicate field name %q", p.Name, p.Fields[i].Name)
 		}
-		seen[p.Signals[i].Name] = struct{}{}
+		seen[p.Fields[i].Name] = struct{}{}
 	}
 	return nil
 }
@@ -174,36 +182,33 @@ func (s *SimpleEventConfig) validate(name string) error {
 	return nil
 }
 
-// SDOFilter selects passively observed SDO traffic for generic raw emission.
-// Unset fields are wildcards.
-type SDOFilter struct {
-	NodeID   *uint8  `mapstructure:"node_id"`
-	Index    *uint16 `mapstructure:"index"`
-	SubIndex *uint8  `mapstructure:"sub_index"`
-}
-
-func (f *SDOFilter) validate() error {
-	if f.NodeID != nil && (*f.NodeID < 1 || *f.NodeID > 127) {
-		return fmt.Errorf("sniff.sdo filter: node_id %d out of range 1..127", *f.NodeID)
-	}
-	return nil
-}
-
-// SDOObjectConfig describes the datatype and output mapping for one SDO
-// object. The signal fields use the completed SDO payload as their input.
+// SDOObjectConfig identifies one SDO object (node/index/sub-index) and
+// decodes one or more named values from its completed transfer payload.
+// Multiple Fields entries decode a struct - e.g. a multi-field CANopen
+// record - from one object; a single entry decodes a plain scalar object.
 type SDOObjectConfig struct {
-	NodeID       uint8  `mapstructure:"node_id"`
-	Index        uint16 `mapstructure:"index"`
-	SubIndex     uint8  `mapstructure:"sub_index"`
-	SignalConfig `mapstructure:",squash"`
+	NodeID   uint8         `mapstructure:"node_id"`
+	Index    uint16        `mapstructure:"index"`
+	SubIndex uint8         `mapstructure:"sub_index"`
+	Fields   []FieldConfig `mapstructure:"fields"`
 }
 
-func (s *SDOObjectConfig) validate() error {
+func (s *SDOObjectConfig) validate(scope string) error {
 	if s.NodeID < 1 || s.NodeID > 127 {
-		return fmt.Errorf("sniff.sdo.objects: node_id %d out of range 1..127", s.NodeID)
+		return fmt.Errorf("%s: node_id %d out of range 1..127", scope, s.NodeID)
 	}
-	if err := s.SignalConfig.validate("sniff.sdo object"); err != nil {
-		return err
+	if len(s.Fields) == 0 {
+		return fmt.Errorf("%s: must declare at least one field", scope)
+	}
+	seen := make(map[string]struct{}, len(s.Fields))
+	for i := range s.Fields {
+		if err := s.Fields[i].validate(scope + " field"); err != nil {
+			return err
+		}
+		if _, dup := seen[s.Fields[i].Name]; dup {
+			return fmt.Errorf("%s: duplicate field name %q", scope, s.Fields[i].Name)
+		}
+		seen[s.Fields[i].Name] = struct{}{}
 	}
 	return nil
 }
@@ -213,7 +218,6 @@ func (s *SDOObjectConfig) validate() error {
 type SDOSniffConfig struct {
 	Channels []SDOChannelConfig `mapstructure:"channels"`
 	Objects  []SDOObjectConfig  `mapstructure:"objects"`
-	Raw      SDORawConfig       `mapstructure:"raw"`
 }
 
 // SDOChannelConfig identifies one standard CANopen SDO client/server COB-ID
@@ -226,23 +230,15 @@ type SDOChannelConfig struct {
 
 func (c *SDOChannelConfig) validate(index int) error {
 	if c.NodeID == 0 || c.NodeID > 127 {
-		return fmt.Errorf("sniff.sdo.channels[%d]: node_id must be in range 1..127", index)
+		return fmt.Errorf("sdo.sniff.channels[%d]: node_id must be in range 1..127", index)
 	}
 	if c.ClientToServerCobID > 0x7FF {
-		return fmt.Errorf("sniff.sdo.channels[%d]: client_to_server_cob_id must be a standard CAN ID in range 0x000..0x7FF", index)
+		return fmt.Errorf("sdo.sniff.channels[%d]: client_to_server_cob_id must be a standard CAN ID in range 0x000..0x7FF", index)
 	}
 	if c.ServerToClientCobID > 0x7FF {
-		return fmt.Errorf("sniff.sdo.channels[%d]: server_to_client_cob_id must be a standard CAN ID in range 0x000..0x7FF", index)
+		return fmt.Errorf("sdo.sniff.channels[%d]: server_to_client_cob_id must be a standard CAN ID in range 0x000..0x7FF", index)
 	}
 	return nil
-}
-
-// SDORawConfig controls optional generic hex emission for completed standard
-// SDO transfers. Typed object definitions are emitted independently.
-type SDORawConfig struct {
-	Metrics bool        `mapstructure:"metrics"`
-	Logs    bool        `mapstructure:"logs"`
-	Filters []SDOFilter `mapstructure:"filters"`
 }
 
 func (s *SDOSniffConfig) validate() error {
@@ -253,28 +249,68 @@ func (s *SDOSniffConfig) validate() error {
 		}
 		for _, cobID := range []uint32{s.Channels[i].ClientToServerCobID, s.Channels[i].ServerToClientCobID} {
 			if _, duplicate := seen[cobID]; duplicate {
-				return fmt.Errorf("sniff.sdo.channels: duplicate cob_id 0x%03X", cobID)
+				return fmt.Errorf("sdo.sniff.channels: duplicate cob_id 0x%03X", cobID)
 			}
 			seen[cobID] = struct{}{}
 		}
 	}
 	objectSeen := make(map[string]struct{}, len(s.Objects))
 	for i := range s.Objects {
-		if err := s.Objects[i].validate(); err != nil {
-			return fmt.Errorf("sniff.sdo.objects[%d]: %w", i, err)
+		if err := s.Objects[i].validate(fmt.Sprintf("sdo.sniff.objects[%d]", i)); err != nil {
+			return err
 		}
 		key := fmt.Sprintf("%d:%04X:%02X", s.Objects[i].NodeID, s.Objects[i].Index, s.Objects[i].SubIndex)
 		if _, duplicate := objectSeen[key]; duplicate {
-			return fmt.Errorf("sniff.sdo.objects: duplicate object %s", key)
+			return fmt.Errorf("sdo.sniff.objects: duplicate object %s", key)
 		}
 		objectSeen[key] = struct{}{}
 	}
-	for i := range s.Raw.Filters {
-		if err := s.Raw.Filters[i].validate(); err != nil {
-			return fmt.Errorf("sniff.sdo.raw.filters[%d]: %w", i, err)
+	return nil
+}
+
+// SDOPollConfig declares standard CANopen SDO objects to actively poll.
+// Config/validation only: nothing in this receiver initiates an SDO
+// transfer yet (see this package's doc comment). Declaring entries here
+// has no runtime effect today.
+type SDOPollConfig struct {
+	Interval time.Duration     `mapstructure:"interval"`
+	Objects  []SDOObjectConfig `mapstructure:"objects"`
+}
+
+func (p *SDOPollConfig) validate() error {
+	if len(p.Objects) == 0 {
+		return nil
+	}
+	if p.Interval <= 0 {
+		return errors.New("sdo.poll: interval must be > 0 when objects are declared")
+	}
+	seen := make(map[string]struct{}, len(p.Objects))
+	for i := range p.Objects {
+		if err := p.Objects[i].validate("sdo.poll.objects"); err != nil {
+			return fmt.Errorf("sdo.poll.objects[%d]: %w", i, err)
 		}
+		key := fmt.Sprintf("%d:%04X:%02X", p.Objects[i].NodeID, p.Objects[i].Index, p.Objects[i].SubIndex)
+		if _, dup := seen[key]; dup {
+			return fmt.Errorf("sdo.poll.objects: duplicate object %s", key)
+		}
+		seen[key] = struct{}{}
 	}
 	return nil
+}
+
+// SDOConfig groups standard-CANopen-SDO config: passive Sniff (real,
+// working today) and active Poll (config/validation-only for now; see
+// SDOPollConfig).
+type SDOConfig struct {
+	Sniff SDOSniffConfig `mapstructure:"sniff"`
+	Poll  SDOPollConfig  `mapstructure:"poll"`
+}
+
+func (s *SDOConfig) validate() error {
+	if err := s.Sniff.validate(); err != nil {
+		return err
+	}
+	return s.Poll.validate()
 }
 
 // RawMatchByte is a byte-equality condition used to discriminate between
@@ -298,19 +334,20 @@ func (m *RawMatchByte) validate(scope string) error {
 // application-layer command/response). Match narrows which frames on
 // CobID this definition applies to (useful when one COB-ID multiplexes
 // several command types); an empty Match matches every frame on CobID.
-// Signals decode fields from the payload exactly like a PDO's signals,
+// Fields decode values from the payload exactly like a PDO's fields,
 // using the same types/bit offsets/scale, so no bespoke processor is
-// needed for fixed-layout vendor protocols.
+// needed for fixed-layout vendor protocols; multiple entries decode a
+// struct from one frame.
 type RawMessageConfig struct {
-	Name    string         `mapstructure:"name"`
-	CobID   uint32         `mapstructure:"cob_id"`
-	Match   []RawMatchByte `mapstructure:"match"`
-	Signals []SignalConfig `mapstructure:"signals"`
+	Name   string         `mapstructure:"name"`
+	CobID  uint32         `mapstructure:"cob_id"`
+	Match  []RawMatchByte `mapstructure:"match"`
+	Fields []FieldConfig  `mapstructure:"fields"`
 }
 
 func (r *RawMessageConfig) validate() error {
 	if r.Name == "" {
-		return errors.New("sniff.raw.messages: name must not be empty")
+		return errors.New("raw.sniff.messages: name must not be empty")
 	}
 	if r.CobID == 0 || r.CobID > 0x7FF {
 		return fmt.Errorf("raw message %q: cob_id 0x%X out of range for an 11-bit standard COB-ID", r.Name, r.CobID)
@@ -320,18 +357,18 @@ func (r *RawMessageConfig) validate() error {
 			return err
 		}
 	}
-	if len(r.Signals) == 0 {
-		return fmt.Errorf("raw message %q: must declare at least one signal", r.Name)
+	if len(r.Fields) == 0 {
+		return fmt.Errorf("raw message %q: must declare at least one field", r.Name)
 	}
-	seen := make(map[string]struct{}, len(r.Signals))
-	for i := range r.Signals {
-		if err := r.Signals[i].validate(fmt.Sprintf("raw message %q signal", r.Name)); err != nil {
+	seen := make(map[string]struct{}, len(r.Fields))
+	for i := range r.Fields {
+		if err := r.Fields[i].validate(fmt.Sprintf("raw message %q field", r.Name)); err != nil {
 			return err
 		}
-		if _, dup := seen[r.Signals[i].Name]; dup {
-			return fmt.Errorf("raw message %q: duplicate signal name %q", r.Name, r.Signals[i].Name)
+		if _, dup := seen[r.Fields[i].Name]; dup {
+			return fmt.Errorf("raw message %q: duplicate field name %q", r.Name, r.Fields[i].Name)
 		}
-		seen[r.Signals[i].Name] = struct{}{}
+		seen[r.Fields[i].Name] = struct{}{}
 	}
 	return nil
 }
@@ -343,7 +380,7 @@ func (r *RawMessageConfig) validate() error {
 // declares field layout for a CobID, matching frames are decoded into named
 // signals instead. This is intended for vendor/proprietary traffic riding on
 // the bus (e.g. diagnostic or service-tool protocols) without teaching this
-// receiver vendor-specific semantics beyond a declarative field layout.
+// receiver protocol-specific semantics beyond a declarative field layout.
 type RawFrameConfig struct {
 	Metrics bool `mapstructure:"metrics"`
 	Logs    bool `mapstructure:"logs"`
@@ -364,70 +401,143 @@ func (r *RawFrameConfig) validate() error {
 	seen := make(map[uint32]struct{}, len(r.CobIDs))
 	for _, id := range r.CobIDs {
 		if id > 0x7FF {
-			return fmt.Errorf("sniff.raw.cob_ids: 0x%X out of range for an 11-bit standard COB-ID", id)
+			return fmt.Errorf("raw.sniff.cob_ids: 0x%X out of range for an 11-bit standard COB-ID", id)
 		}
 		if _, dup := seen[id]; dup {
-			return fmt.Errorf("sniff.raw.cob_ids: duplicate cob_id 0x%X", id)
+			return fmt.Errorf("raw.sniff.cob_ids: duplicate cob_id 0x%X", id)
 		}
 		seen[id] = struct{}{}
 	}
 	seenNames := make(map[string]struct{}, len(r.Messages))
 	for i := range r.Messages {
 		if err := r.Messages[i].validate(); err != nil {
-			return fmt.Errorf("sniff.raw.messages[%d]: %w", i, err)
+			return fmt.Errorf("raw.sniff.messages[%d]: %w", i, err)
 		}
 		if _, dup := seenNames[r.Messages[i].Name]; dup {
-			return fmt.Errorf("sniff.raw.messages: duplicate name %q", r.Messages[i].Name)
+			return fmt.Errorf("raw.sniff.messages: duplicate name %q", r.Messages[i].Name)
 		}
 		seenNames[r.Messages[i].Name] = struct{}{}
 	}
 	return nil
 }
 
-// SniffConfig configures passive traffic sniffing.
-type SniffConfig struct {
-	Enabled   bool              `mapstructure:"enabled"`
-	Heartbeat SimpleEventConfig `mapstructure:"heartbeat"`
-	EMCY      SimpleEventConfig `mapstructure:"emcy"`
-	// SDO passively observes standard client/server SDO traffic. It does not
-	// initiate transfers; active polling is a separate future capability.
-	SDO  SDOSniffConfig `mapstructure:"sdo"`
-	PDOs []PDOConfig    `mapstructure:"pdos"`
-	// Raw captures arbitrary CAN IDs as undecoded hex payload; see
-	// RawFrameConfig.
-	Raw RawFrameConfig `mapstructure:"raw"`
+// RawResponseConfig declares how a RawTransactionConfig's correlated reply
+// would be decoded, once the receiver supports correlating it. Config/
+// validation only for now - see RawTransactionConfig.
+type RawResponseConfig struct {
+	CobID  uint32        `mapstructure:"cob_id"`
+	Fields []FieldConfig `mapstructure:"fields"`
 }
 
-func (s *SniffConfig) validate() error {
-	if !s.Enabled {
-		return nil
+func (r *RawResponseConfig) validate(scope string) error {
+	if r.CobID == 0 || r.CobID > 0x7FF {
+		return fmt.Errorf("%s.response: cob_id 0x%X out of range for an 11-bit standard COB-ID", scope, r.CobID)
 	}
-	if err := s.Heartbeat.validate("sniff.heartbeat"); err != nil {
-		return err
+	if len(r.Fields) == 0 {
+		return fmt.Errorf("%s.response: must declare at least one field", scope)
 	}
-	if err := s.EMCY.validate("sniff.emcy"); err != nil {
-		return err
-	}
-	if err := s.SDO.validate(); err != nil {
-		return err
-	}
-	if err := s.Raw.validate(); err != nil {
-		return err
-	}
-	seen := make(map[string]struct{}, len(s.PDOs))
-	cobIDs := make(map[uint32]struct{}, len(s.PDOs))
-	for i := range s.PDOs {
-		if err := s.PDOs[i].validate(); err != nil {
+	seen := make(map[string]struct{}, len(r.Fields))
+	for i := range r.Fields {
+		if err := r.Fields[i].validate(scope + ".response field"); err != nil {
 			return err
 		}
-		if _, dup := seen[s.PDOs[i].Name]; dup {
-			return fmt.Errorf("sniff.pdos: duplicate pdo name %q", s.PDOs[i].Name)
+		if _, dup := seen[r.Fields[i].Name]; dup {
+			return fmt.Errorf("%s.response: duplicate field name %q", scope, r.Fields[i].Name)
 		}
-		seen[s.PDOs[i].Name] = struct{}{}
-		if _, dup := cobIDs[s.PDOs[i].CobID]; dup {
-			return fmt.Errorf("sniff.pdos: duplicate cob_id 0x%X", s.PDOs[i].CobID)
+		seen[r.Fields[i].Name] = struct{}{}
+	}
+	return nil
+}
+
+// RawTransactionConfig declares a raw CAN request/response poll cycle: send
+// the request, wait for the correlated reply (or Timeout), then wait Interval before polling again -
+// not a fixed-rate blind retransmit. Config/validation only for now:
+// nothing in this receiver transmits a request or correlates a reply to it
+// yet - a planned future addition, same status as SDOPollConfig. Declaring
+// one here is inert today.
+type RawTransactionConfig struct {
+	Name  string `mapstructure:"name"`
+	CobID uint32 `mapstructure:"cob_id"`
+	// Payload is the fixed request frame's payload bytes (1-8).
+	Payload []uint8 `mapstructure:"payload"`
+	// Timeout bounds how long to wait for the correlated response before
+	// giving up on that poll cycle.
+	Timeout time.Duration `mapstructure:"timeout"`
+	// Interval is how long to wait after a response (or Timeout) before
+	// sending the next request.
+	Interval time.Duration     `mapstructure:"interval"`
+	Response RawResponseConfig `mapstructure:"response"`
+}
+
+func (r *RawTransactionConfig) validate() error {
+	if r.Name == "" {
+		return errors.New("raw.transactions: name must not be empty")
+	}
+	if r.CobID == 0 || r.CobID > 0x7FF {
+		return fmt.Errorf("raw transaction %q: cob_id 0x%X out of range for an 11-bit standard COB-ID", r.Name, r.CobID)
+	}
+	if len(r.Payload) == 0 || len(r.Payload) > 8 {
+		return fmt.Errorf("raw transaction %q: payload must be 1..8 bytes", r.Name)
+	}
+	if r.Timeout <= 0 {
+		return fmt.Errorf("raw transaction %q: timeout must be > 0", r.Name)
+	}
+	if r.Interval <= 0 {
+		return fmt.Errorf("raw transaction %q: interval must be > 0", r.Name)
+	}
+	if err := r.Response.validate(fmt.Sprintf("raw transaction %q", r.Name)); err != nil {
+		return err
+	}
+	return nil
+}
+
+// RawConfig groups non-CANopen (vendor/proprietary) CAN traffic config:
+// passive Sniff (real, working today) and Transactions (config/validation-
+// only for now; see RawTransactionConfig).
+type RawConfig struct {
+	Sniff        RawFrameConfig         `mapstructure:"sniff"`
+	Transactions []RawTransactionConfig `mapstructure:"transactions"`
+}
+
+func (r *RawConfig) validate() error {
+	if err := r.Sniff.validate(); err != nil {
+		return err
+	}
+	seenNames := make(map[string]struct{}, len(r.Transactions))
+	seenCobIDs := make(map[uint32]struct{}, len(r.Transactions))
+	for i := range r.Transactions {
+		if err := r.Transactions[i].validate(); err != nil {
+			return fmt.Errorf("raw.transactions[%d]: %w", i, err)
 		}
-		cobIDs[s.PDOs[i].CobID] = struct{}{}
+		if _, dup := seenNames[r.Transactions[i].Name]; dup {
+			return fmt.Errorf("raw.transactions: duplicate name %q", r.Transactions[i].Name)
+		}
+		seenNames[r.Transactions[i].Name] = struct{}{}
+		if _, dup := seenCobIDs[r.Transactions[i].CobID]; dup {
+			return fmt.Errorf("raw.transactions: duplicate cob_id 0x%X", r.Transactions[i].CobID)
+		}
+		seenCobIDs[r.Transactions[i].CobID] = struct{}{}
+	}
+	return nil
+}
+
+// validatePDOs checks a list of PDOConfig for internal validity and
+// duplicate names/COB-IDs.
+func validatePDOs(pdos []PDOConfig) error {
+	seen := make(map[string]struct{}, len(pdos))
+	cobIDs := make(map[uint32]struct{}, len(pdos))
+	for i := range pdos {
+		if err := pdos[i].validate(); err != nil {
+			return err
+		}
+		if _, dup := seen[pdos[i].Name]; dup {
+			return fmt.Errorf("pdo: duplicate pdo name %q", pdos[i].Name)
+		}
+		seen[pdos[i].Name] = struct{}{}
+		if _, dup := cobIDs[pdos[i].CobID]; dup {
+			return fmt.Errorf("pdo: duplicate cob_id 0x%X", pdos[i].CobID)
+		}
+		cobIDs[pdos[i].CobID] = struct{}{}
 	}
 	return nil
 }
@@ -453,7 +563,11 @@ type LogsConfig struct {
 	Enabled bool `mapstructure:"enabled"`
 }
 
-// Config is the configuration for the CANopen receiver.
+// Config is the configuration for the CANopen receiver. sdo, pdo, and raw
+// are independent top-level sections - each is optional on its own, with
+// no blanket "sniffing enabled" toggle; an unset section simply emits
+// nothing. heartbeat/emcy are always passive (like pdo), so they don't
+// have a sniff/poll split; sdo and raw do (see SDOConfig, RawConfig).
 type Config struct {
 	// Interface is the SocketCAN interface name (e.g. "can0", "vcan0").
 	Interface string `mapstructure:"interface"`
@@ -466,7 +580,12 @@ type Config struct {
 	Metrics MetricsConfig `mapstructure:"metrics"`
 	Logs    LogsConfig    `mapstructure:"logs"`
 
-	Sniff SniffConfig `mapstructure:"sniff"`
+	Heartbeat SimpleEventConfig `mapstructure:"heartbeat"`
+	EMCY      SimpleEventConfig `mapstructure:"emcy"`
+
+	SDO SDOConfig   `mapstructure:"sdo"`
+	PDO []PDOConfig `mapstructure:"pdo"`
+	Raw RawConfig   `mapstructure:"raw"`
 }
 
 var _ component.Config = (*Config)(nil)
@@ -485,17 +604,28 @@ func (cfg *Config) Validate() error {
 	if err := cfg.Metrics.validate(); err != nil {
 		return err
 	}
-	if !cfg.Sniff.Enabled {
-		return errors.New("sniff must be enabled")
+	if err := cfg.Heartbeat.validate("heartbeat"); err != nil {
+		return err
 	}
-	if err := cfg.Sniff.validate(); err != nil {
+	if err := cfg.EMCY.validate("emcy"); err != nil {
+		return err
+	}
+	if err := cfg.SDO.validate(); err != nil {
+		return err
+	}
+	if err := cfg.Raw.validate(); err != nil {
+		return err
+	}
+	if err := validatePDOs(cfg.PDO); err != nil {
 		return err
 	}
 
 	// Cross-check: any signal requesting metrics emission requires
 	// metrics.enabled, and any signal requesting logs emission requires
 	// logs.enabled, so misconfiguration fails fast instead of silently
-	// dropping data.
+	// dropping data. This also covers the still-unimplemented sdo.poll/
+	// raw.transactions sections, so their config is already correct the
+	// moment the receiver starts acting on it.
 	var checkOutputs func(scope string, metrics, logs bool) error
 	checkOutputs = func(scope string, metrics, logs bool) error {
 		if metrics && !cfg.Metrics.Enabled {
@@ -506,33 +636,46 @@ func (cfg *Config) Validate() error {
 		}
 		return nil
 	}
-	if err := checkOutputs("sniff.heartbeat", cfg.Sniff.Heartbeat.Metrics, cfg.Sniff.Heartbeat.Logs); err != nil {
+	if err := checkOutputs("heartbeat", cfg.Heartbeat.Metrics, cfg.Heartbeat.Logs); err != nil {
 		return err
 	}
-	if err := checkOutputs("sniff.emcy", cfg.Sniff.EMCY.Metrics, cfg.Sniff.EMCY.Logs); err != nil {
+	if err := checkOutputs("emcy", cfg.EMCY.Metrics, cfg.EMCY.Logs); err != nil {
 		return err
 	}
-	if err := checkOutputs("sniff.sdo.raw", cfg.Sniff.SDO.Raw.Metrics, cfg.Sniff.SDO.Raw.Logs); err != nil {
+	if err := checkOutputs("raw.sniff", cfg.Raw.Sniff.Metrics, cfg.Raw.Sniff.Logs); err != nil {
 		return err
 	}
-	if err := checkOutputs("sniff.raw", cfg.Sniff.Raw.Metrics, cfg.Sniff.Raw.Logs); err != nil {
-		return err
-	}
-	for _, pdo := range cfg.Sniff.PDOs {
-		for _, sig := range pdo.Signals {
-			if err := checkOutputs(fmt.Sprintf("pdo %q signal %q", pdo.Name, sig.Name), sig.Metrics, sig.Logs); err != nil {
+	for _, pdo := range cfg.PDO {
+		for _, field := range pdo.Fields {
+			if err := checkOutputs(fmt.Sprintf("pdo %q field %q", pdo.Name, field.Name), field.Metrics, field.Logs); err != nil {
 				return err
 			}
 		}
 	}
-	for _, object := range cfg.Sniff.SDO.Objects {
-		if err := checkOutputs(fmt.Sprintf("sdo object %q", object.Name), object.Metrics, object.Logs); err != nil {
-			return err
+	for _, object := range cfg.SDO.Sniff.Objects {
+		for _, field := range object.Fields {
+			if err := checkOutputs(fmt.Sprintf("sdo.sniff object %d:%04X:%02X field %q", object.NodeID, object.Index, object.SubIndex, field.Name), field.Metrics, field.Logs); err != nil {
+				return err
+			}
 		}
 	}
-	for _, msg := range cfg.Sniff.Raw.Messages {
-		for _, sig := range msg.Signals {
-			if err := checkOutputs(fmt.Sprintf("raw message %q signal %q", msg.Name, sig.Name), sig.Metrics, sig.Logs); err != nil {
+	for _, object := range cfg.SDO.Poll.Objects {
+		for _, field := range object.Fields {
+			if err := checkOutputs(fmt.Sprintf("sdo.poll object %d:%04X:%02X field %q", object.NodeID, object.Index, object.SubIndex, field.Name), field.Metrics, field.Logs); err != nil {
+				return err
+			}
+		}
+	}
+	for _, msg := range cfg.Raw.Sniff.Messages {
+		for _, field := range msg.Fields {
+			if err := checkOutputs(fmt.Sprintf("raw.sniff message %q field %q", msg.Name, field.Name), field.Metrics, field.Logs); err != nil {
+				return err
+			}
+		}
+	}
+	for _, txn := range cfg.Raw.Transactions {
+		for _, field := range txn.Response.Fields {
+			if err := checkOutputs(fmt.Sprintf("raw transaction %q field %q", txn.Name, field.Name), field.Metrics, field.Logs); err != nil {
 				return err
 			}
 		}
@@ -548,9 +691,6 @@ func createDefaultConfig() component.Config {
 			FlushInterval: 10 * time.Second,
 		},
 		Logs: LogsConfig{
-			Enabled: true,
-		},
-		Sniff: SniffConfig{
 			Enabled: true,
 		},
 	}

@@ -1,7 +1,8 @@
 # canopenreceiver emitted telemetry
 
 This documents the telemetry this receiver produces automatically, in
-addition to whatever user-configured signals (`sniff.pdos[].signals[]`) are
+addition to whatever user-configured fields (`pdo[].fields[]`,
+`sdo.sniff.objects[].fields[]`, `raw.sniff.messages[].fields[]`) are
 emitted under their configured names.
 
 All metrics and logs share a resource with attribute `canopen.interface`
@@ -13,7 +14,7 @@ event is attributable to a specific node.
 ### `canopen.node.nmt_state`
 
 - **Type**: gauge (unitless integer NMT state code)
-- **Enabled by**: `sniff.heartbeat.metrics: true`
+- **Enabled by**: `heartbeat.metrics: true`
 - **Attributes (resource)**: `canopen.interface`, `canopen.node_id`
 - **Value**: raw NMT state byte from the heartbeat frame (`0x00` bootup,
   `0x04` stopped, `0x05` operational, `0x7F` pre-operational).
@@ -22,113 +23,64 @@ event is attributable to a specific node.
 ### `canopen.node.emcy_error_register`
 
 - **Type**: gauge (unitless)
-- **Enabled by**: `sniff.emcy.metrics: true`
+- **Enabled by**: `emcy.metrics: true`
 - **Attributes (resource)**: `canopen.interface`, `canopen.node_id`
 - **Value**: the CiA 301 error register byte from the EMCY frame.
 - Emitted on every EMCY frame.
-
-### `canopen.sdo.transfers`
-
-- **Type**: non-monotonic cumulative sum; one point with value `1` per
-  passively observed completed SDO transfer or abort.
-- **Enabled by**: `sniff.sdo.raw.metrics: true`
-- **Attributes (resource)**: `canopen.interface`, `canopen.node_id`
-- **Attributes (point)**: `canopen.sdo.direction`
-  (`client_to_server` or `server_to_client`), `canopen.sdo.command`, and,
-  for initiation/abort frames, `canopen.sdo.index` and
-  `canopen.sdo.subindex`. Abort responses also carry
-  `canopen.sdo.abort_code`.
-- Supports expedited and segmented upload/download transfers. The receiver is
-  only an observer: it does not send or respond to SDO frames.
-- Multiple SDO channels can be configured on the same CAN interface. Each
-  channel specifies its node ID and client/server COB-ID pair. Configured
-  COB-IDs may use nonstandard assignments; they are only required to be valid
-  standard 11-bit CAN IDs and unique across the configured channels.
-- `sniff.sdo.raw.filters` can restrict generic raw emission by node ID, object index, and
-  sub-index. The specified fields within one filter are combined with AND;
-  multiple filter entries are alternatives, combined with OR.
 
 ### `canopen.raw.frames`
 
 - **Type**: non-monotonic cumulative sum; one point with value `1` per
   captured raw frame.
-- **Enabled by**: `sniff.raw.metrics: true`, for a COB-ID listed in
-  `sniff.raw.cob_ids`.
+- **Enabled by**: `raw.sniff.metrics: true`, for a COB-ID listed in
+  `raw.sniff.cob_ids`.
 - **Attributes (resource)**: `canopen.interface`, `canopen.cob_id`.
 - **Attributes (point)**: `canopen.raw.data` (uppercase hexadecimal payload).
 - No protocol decoding is performed. This exists to capture non-CANopen or
   vendor-proprietary traffic sharing the bus (e.g. a service-tool protocol)
   so it can be decoded by a separate, downstream component.
 
-### Declarative raw message decoding (`sniff.raw.messages[]`)
+### User-configured metrics (`sdo.sniff.objects[]`, `pdo[].fields[]`, `raw.sniff.messages[].fields[]`)
 
-- For fixed-layout vendor frames, `sniff.raw.messages[]` decodes named
-  signals directly (same signal semantics as `sniff.pdos[].signals[]`:
-  type, bit offset, scale/offset, unit, `emit`, `metric_type`,
-  `attributes`) instead of emitting opaque raw hex, so a bespoke downstream
-  processor is often unnecessary.
+- **Type**: gauge or sum (per field's `metric_type`), named by the field's
+  `name`.
+- **Enabled by**: the individual field's `metrics: true`. Not supported for
+  `bytes`/`visible_string` fields.
+- Multiple SDO channels can be configured on the same CAN interface. Each
+  channel specifies its node ID and client/server COB-ID pair. Configured
+  COB-IDs may use nonstandard assignments; they are only required to be
+  valid standard 11-bit CAN IDs and unique across the configured channels.
+- There is no generic undecoded fallback for SDO transfers - only
+  explicitly declared `sdo.sniff.objects[]`/`sdo.poll.objects[]` are ever
+  emitted; any object's structure (including a multi-field struct) can
+  always be declared precisely.
+
+### Declarative raw message decoding (`raw.sniff.messages[]`)
+
+- For fixed-layout vendor frames, `raw.sniff.messages[]` decodes named
+  fields directly (same semantics as `pdo[].fields[]`: type, bit offset,
+  scale/offset, unit, `metrics`, `logs`, `metric_type`, `attributes`)
+  instead of emitting opaque raw hex, so a bespoke downstream processor is
+  often unnecessary.
 - Each message may declare `match[]` byte-equality conditions (ANDed) to
   discriminate its shape from other messages sharing the same COB-ID, such
   as a vendor command word echoed at the start of the payload. A message
   with no `match[]` matches every frame on its `cob_id`.
-- Decoded signals are emitted as metrics/logs under their own configured
-  name, following the same emission rules as PDO signals — not as
+- Decoded fields are emitted as metrics/logs under their own configured
+  name, following the same emission rules as PDO fields — not as
   `canopen.raw.frames` / raw hex.
 - If a frame's COB-ID has declared messages but none of them match, the
   frame falls back to the generic raw-hex capture (`canopen.raw.frames` /
-  raw-frame log) described above, when `sniff.raw.emit` is set.
+  raw-frame log) described above, when `raw.sniff.metrics`/`raw.sniff.logs`
+  is set.
 - Declaring a message automatically enables raw capture on its `cob_id`;
-  it does not need to also appear in `sniff.raw.cob_ids[]`.
-
-#### Limitation: no cross-frame reassembly for vendor multi-sequence commands
-
-`sniff.raw.messages[]` decodes each frame **independently and statelessly**
-— nothing is buffered or correlated across frames. This is sufficient for
-vendor commands that fit in a single 8-byte frame (e.g. TRUCKCOM's
-`0x8008`, `0x80FA`, `0x8037`, `0x8046`), but **not** for commands like
-DHU/TRUCKCOM's `0x800E` (`tcReadPartNo`), which spread one logical result
-across up to 8 separate frames distinguished only by an application-level
-sequence byte (`Data[2]`), with no CiA-301 toggle/last-segment framing to
-key off of.
-
-You can still declare one `sniff.raw.messages[]` entry per sequence number
-(matching `byte_offset`/`value` on the sequence byte) to decode each
-sequence's fields as independent signals — e.g. sequence 3 yields the
-firmware part number, sequence 4 yields its extension — but these are
-emitted as **separate, uncorrelated** telemetry points, not merged into
-one combined event. Reconstructing a single logical record from multiple
-vendor sequences would require stateful, protocol-specific reassembly
-(tracking partial sequences per node/COB-ID, deciding when a set is
-"complete", handling out-of-order or missing sequences) that intentionally
-does not belong in this generic, protocol-agnostic mechanism. If you need
-that, implement it in a separate downstream component (e.g. a processor
-that correlates the independently-emitted per-sequence signals), keeping
-this receiver's raw-message decoding purely declarative and stateless.
-
-#### Caveat: COB-IDs shared between raw capture and real SDO transfers
-
-Some vendor protocols reuse a device's genuine standard SDO COB-IDs
-(`0x580 + node ID` / `0x600 + node ID`) to carry a private, non-CiA-301
-application protocol — for example a service-tool command word echoed in
-bytes 0-1, sometimes itself spanning multiple frames correlated by an
-application-defined sequence number rather than CiA-301's toggle/segment
-bits. `HandleFrame` checks `sniff.raw.cob_ids`/`sniff.raw.messages` *before*
-routing a frame to the SDO observer, so any COB-ID listed there is fully
-diverted to raw handling and never reaches `sniff.sdo`. This is
-intentional and safe, but it means: **enabling raw capture/decoding on a
-COB-ID that is also a real SDO pair disables passive SDO reassembly for
-*all* traffic on that pair**, not just the vendor frames — the receiver
-cannot distinguish a genuine CANopen SDO segment from a vendor multiframe
-sequence sharing the same wire. If you need both, only declare
-`sniff.raw` for COB-IDs that are exclusively used by the vendor protocol;
-where a COB-ID is genuinely shared, this receiver cannot safely observe
-both protocols on it simultaneously.
+  it does not need to also appear in `raw.sniff.cob_ids[]`.
 
 ## Logs
 
 ### Heartbeat / NMT state changes
 
-- **Enabled by**: `sniff.heartbeat.logs: true`
+- **Enabled by**: `heartbeat.logs: true`
 - **Emitted**: only when a node's NMT state changes (not on every
   heartbeat), to avoid flooding logs on a node that stays in one state.
 - **Severity**: Info
@@ -137,7 +89,7 @@ both protocols on it simultaneously.
 
 ### EMCY (emergency) messages
 
-- **Enabled by**: `sniff.emcy.logs: true`
+- **Enabled by**: `emcy.logs: true`
 - **Emitted**: on every EMCY frame.
 - **Severity**: Warn (Info if the error code is `0x0000`, i.e. "error
   reset/no error").
@@ -145,42 +97,30 @@ both protocols on it simultaneously.
   `canopen.emcy.register` (int). The log body includes a human-readable
   description of the CiA 301 error code category.
 
-### SDO traffic
+### User-configured field logs (PDO/SDO object/raw message/raw transaction)
 
-- **Enabled by**: `sniff.sdo.raw.logs: true`
-- **Emitted**: once when a standard expedited or segmented SDO transfer
-  completes, or when an SDO abort is observed. Client frames use
-  `0x600 + node ID`; server frames use `0x580 + node ID`.
+- **Enabled by**: at least one field in the group having `logs: true`.
+- **Emitted**: once per matched frame/completed SDO transfer, combining
+  every field in that group with `logs: true` into a **single** structured
+  log record - not one record per field. Aborted SDO transfers produce no
+  emission (there's no data to decode).
 - **Severity**: Info
-- **Attributes**: `canopen.node_id` (int), `canopen.sdo.direction`,
-  `canopen.sdo.operation` (`upload`, `download`, or `abort`), index/subindex,
-  and `canopen.sdo.data` (uppercase hexadecimal payload). Abort responses
-  additionally include `canopen.sdo.abort_code`.
-- This is passive observability of traffic between other CANopen devices; it
-  neither sends SDO requests nor registers an SDO server.
-
-Generic raw SDO emission is opt-in under `sniff.sdo.raw`; its optional
-`raw.filters[]` allow-list applies only to that generic raw output. It is
-independent of typed object definitions. Typed SDO object definitions can
-additionally decode completed transfer
-payloads using the same datatype, scaling, and output settings as PDO signals.
-For example, an object definition for `0x20F0:11` can turn the raw payload
-into a firmware-version metric or log value. SDO filters select which
-transfers are observed; typed object definitions provide the datatype and
-output name for matching objects.
+- **Body**: the decoded field value directly when exactly one field is logged;
+  when multiple fields are logged, a structured map keyed by each field's
+  `name` (the same identifier used for its metric, if any) is used. Values are
+  a hex string for `bytes`, the string itself for `visible_string`, or the
+  scaled numeric value otherwise.
+- **Attributes**: context metadata only, never the decoded values -
+  `canopen.pdo.name` (PDO), `canopen.node_id`/`canopen.sdo.index`/
+  `canopen.sdo.subindex`/`canopen.sdo.direction`/`canopen.sdo.operation`
+  (SDO object), or `canopen.raw.message` (raw message) - plus every field's
+  static `attributes:`, merged in.
 
 ### Raw frame capture
 
-- **Enabled by**: `sniff.raw.metrics` / `sniff.raw.logs`, for a COB-ID listed
-  in `sniff.raw.cob_ids`.
+- **Enabled by**: `raw.sniff.metrics` / `raw.sniff.logs`, for a COB-ID listed
+  in `raw.sniff.cob_ids`.
 - **Emitted**: once per matched frame, with no protocol interpretation.
 - **Severity**: Info
 - **Attributes**: `canopen.cob_id` (hex string), `canopen.raw.data`
   (uppercase hexadecimal payload).
-
-### User-configured PDO signal logs
-
-- **Enabled by**: the individual signal's `logs: true`.
-- **Severity**: Info
-- **Attributes**: `canopen.signal.name`, `canopen.signal.value`,
-  `canopen.pdo.name`, plus any user-configured `attributes`.

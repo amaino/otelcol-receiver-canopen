@@ -16,8 +16,16 @@ type LogRecord struct {
 	ResourceAttrs map[string]string
 	Timestamp     time.Time
 	Severity      plog.SeverityNumber
-	Body          string
-	Attributes    map[string]any
+	// Body is a plain-text body, used when BodyValue and BodyMap are nil.
+	Body string
+	// BodyValue is a scalar structured body for a single decoded field.
+	BodyValue any
+	// BodyMap, when non-nil, is used as a structured map body - one entry per
+	// decoded field name/value, matching how the
+	// rest of the OTel Collector ecosystem represents parsed structured
+	// data (map body), keeping Attributes reserved for record metadata.
+	BodyMap    map[string]any
+	Attributes map[string]any
 }
 
 // LogsBuilder accumulates LogRecords into a plog.Logs batch, grouping
@@ -66,7 +74,16 @@ func (b *LogsBuilder) Add(r LogRecord) {
 	lr.SetObservedTimestamp(pcommon.NewTimestampFromTime(time.Now()))
 	lr.SetSeverityNumber(r.Severity)
 	lr.SetSeverityText(r.Severity.String())
-	lr.Body().SetStr(r.Body)
+	if r.BodyValue != nil {
+		_ = lr.Body().FromRaw(r.BodyValue)
+	} else if r.BodyMap != nil {
+		// Config validation (see canopenreceiver.validateStaticAttributes)
+		// already guarantees every value is a type pcommon.Map.FromRaw
+		// supports, so no error handling is needed here.
+		_ = lr.Body().SetEmptyMap().FromRaw(r.BodyMap)
+	} else {
+		lr.Body().SetStr(r.Body)
+	}
 	// Config validation (see canopenreceiver.validateStaticAttributes)
 	// already guarantees every attribute value is a type pcommon.Map.FromRaw
 	// supports, so no error handling is needed here.
