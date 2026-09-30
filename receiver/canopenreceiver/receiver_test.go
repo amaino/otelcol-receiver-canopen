@@ -327,6 +327,50 @@ func TestSDOPoller_IgnoresAbortForDifferentObject(t *testing.T) {
 	}
 }
 
+func TestReceiver_SDOUploadPollTimeoutDoesNotEmitValue(t *testing.T) {
+	bus := cantransport.NewFakeBus()
+	monitor, err := bus.Dial(context.Background(), "vcan0")
+	require.NoError(t, err)
+	defer monitor.Close()
+
+	cfg := createDefaultConfig().(*Config)
+	cfg.Interface = "vcan0"
+	cfg.ReadTimeout = 20 * time.Millisecond
+	cfg.Metrics.FlushInterval = 20 * time.Millisecond
+	cfg.Metrics.Enabled = false
+	cfg.Logs.Enabled = true
+	cfg.SDO.Poll = SDOPollConfig{
+		Mode:    "once",
+		Timeout: 50 * time.Millisecond,
+		Objects: []SDOObjectConfig{{
+			NodeID: 1, Index: 0x2001, SubIndex: 0,
+			Fields: []FieldConfig{{Name: "device.value", Type: codec.Uint16, Logs: true}},
+		}},
+	}
+	require.NoError(t, cfg.Validate())
+
+	set := receivertest.NewNopSettings(metadata.Type)
+	r := newCanopenReceiver(cfg, set, fakeBusDialer{bus: bus})
+	logsSink := new(consumertest.LogsSink)
+	r.logsConsumer = logsSink
+	require.NoError(t, r.Start(context.Background(), componenttest.NewNopHost()))
+	defer func() { require.NoError(t, r.Shutdown(context.Background())) }()
+
+	recvCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	request, err := monitor.Recv(recvCtx)
+	require.NoError(t, err)
+	assert.Equal(t, uint32(0x601), request.ID)
+	assert.Equal(t, []byte{0x40, 0x01, 0x20, 0, 0, 0, 0, 0}, request.Data)
+
+	require.Never(t, func() bool { return len(logsSink.AllLogs()) > 0 }, 200*time.Millisecond, 10*time.Millisecond)
+
+	noReplyCtx, stopWaiting := context.WithTimeout(context.Background(), 150*time.Millisecond)
+	defer stopWaiting()
+	_, err = monitor.Recv(noReplyCtx)
+	assert.ErrorIs(t, err, context.DeadlineExceeded)
+}
+
 func TestReceiver_SDOUploadPollInterval(t *testing.T) {
 	bus := cantransport.NewFakeBus()
 	monitor, err := bus.Dial(context.Background(), "vcan0")
