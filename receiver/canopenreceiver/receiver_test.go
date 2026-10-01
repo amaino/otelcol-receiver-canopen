@@ -156,4 +156,3 @@ func TestReceiver_MetricsAndLogsFlushIndependently(t *testing.T) {
 		})
 	}
 }
-
