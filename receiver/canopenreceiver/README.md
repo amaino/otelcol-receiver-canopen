@@ -13,7 +13,7 @@ An OpenTelemetry Collector receiver for CANopen traffic over Linux SocketCAN.
 The receiver supports passive sniffing of PDO frames, EMCY (emergency)
 messages, heartbeat/NMT state changes, and SDO traffic exchanged by other
 nodes. It also supports active SDO uploads configured under
-`sniff.sdo.poll`.
+`sdo.poll`.
 All behavior is driven by declarative configuration.
 
 Every field you configure from a PDO, a raw message, an SDO object, or a raw

@@ -100,7 +100,7 @@ func (p *rawTransactionPoller) poll(transaction RawTransactionConfig) {
 		}
 		retriesRemain := transaction.MaxRetries == nil || attempt-1 < *transaction.MaxRetries
 		if !transaction.Retry || !retriesRemain {
-			failureMessage := "canopen: raw transaction failed"
+			var failureMessage string
 			if transaction.Retry {
 				failureMessage = "canopen: raw transaction failed; retry limit reached"
 			} else {

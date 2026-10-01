@@ -365,7 +365,7 @@ func (s *SDOConfig) validate() error {
 		}
 		for nodeID := range polledNodes {
 			if channelCounts[nodeID] > 1 {
-				return fmt.Errorf("sniff.sdo.channels: node_id %d has multiple channels and cannot be polled unambiguously", nodeID)
+				return fmt.Errorf("sdo.sniff.channels: node_id %d has multiple channels and cannot be polled unambiguously", nodeID)
 			}
 		}
 	}
@@ -375,7 +375,7 @@ func (s *SDOConfig) validate() error {
 	}
 	for i, object := range s.Poll.Objects {
 		if passive, exists := passiveObjects[sdoObjectKey(object)]; exists && !reflect.DeepEqual(passive.Fields, object.Fields) {
-			return fmt.Errorf("sniff.sdo.poll.objects[%d]: configuration conflicts with passive object %s", i, sdoObjectKey(object))
+			return fmt.Errorf("sdo.poll.objects[%d]: configuration conflicts with passive object %s", i, sdoObjectKey(object))
 		}
 	}
 	return nil

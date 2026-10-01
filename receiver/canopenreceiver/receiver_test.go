@@ -287,6 +287,8 @@ func TestReceiver_SDOUploadPollRetriesAfterAbort(t *testing.T) {
 	require.NoError(t, cfg.Validate())
 
 	set := receivertest.NewNopSettings(metadata.Type)
+	logCore, observedLogs := observer.New(zap.DebugLevel)
+	set.Logger = zap.New(logCore)
 	r := newCanopenReceiver(cfg, set, fakeBusDialer{bus: bus})
 	require.NoError(t, r.Start(context.Background(), componenttest.NewNopHost()))
 	defer func() { require.NoError(t, r.Shutdown(context.Background())) }()
@@ -301,6 +303,16 @@ func TestReceiver_SDOUploadPollRetriesAfterAbort(t *testing.T) {
 	waitForFrameData(t, recvCtx, monitor, firstRequest.Data)
 
 	bus.Inject(cantransport.Frame{ID: 0x581, Data: []byte{0x4B, 0x01, 0x20, 0, 0x34, 0x12, 0, 0}})
+
+	require.Eventually(t, func() bool {
+		return len(observedLogs.FilterMessage("canopen: SDO poll recovered after retry").All()) == 1
+	}, time.Second, 10*time.Millisecond)
+	entries := observedLogs.All()
+	require.Len(t, entries, 2)
+	assert.Equal(t, "canopen: SDO poll attempt failed; retry scheduled", entries[0].Message)
+	assert.Contains(t, entries[0].ContextMap()["error"], "SDO abort for 0x2001:00")
+	assert.Equal(t, "canopen: SDO poll recovered after retry", entries[1].Message)
+	assert.Equal(t, int64(2), entries[1].ContextMap()["attempts"])
 }
 
 func TestSDOPoller_IgnoresAbortForDifferentObject(t *testing.T) {
@@ -350,6 +362,8 @@ func TestReceiver_SDOUploadPollTimeoutDoesNotEmitValue(t *testing.T) {
 	require.NoError(t, cfg.Validate())
 
 	set := receivertest.NewNopSettings(metadata.Type)
+	logCore, observedLogs := observer.New(zap.DebugLevel)
+	set.Logger = zap.New(logCore)
 	r := newCanopenReceiver(cfg, set, fakeBusDialer{bus: bus})
 	logsSink := new(consumertest.LogsSink)
 	r.logsConsumer = logsSink
@@ -369,6 +383,13 @@ func TestReceiver_SDOUploadPollTimeoutDoesNotEmitValue(t *testing.T) {
 	defer stopWaiting()
 	_, err = monitor.Recv(noReplyCtx)
 	assert.ErrorIs(t, err, context.DeadlineExceeded)
+
+	require.Eventually(t, func() bool {
+		return len(observedLogs.FilterMessage("canopen: SDO poll failed; retries disabled").All()) == 1
+	}, time.Second, 10*time.Millisecond)
+	entries := observedLogs.FilterMessage("canopen: SDO poll failed; retries disabled").All()
+	require.Len(t, entries, 1)
+	assert.Contains(t, entries[0].ContextMap()["error"], "response timed out")
 }
 
 func TestReceiver_SDOUploadPollInterval(t *testing.T) {
@@ -432,6 +453,7 @@ func TestReceiver_RawTransactionPoll(t *testing.T) {
 	cfg.ReadTimeout = 20 * time.Millisecond
 	cfg.Metrics.FlushInterval = 20 * time.Millisecond
 	cfg.Metrics.Enabled = false
+	cfg.Logs.FlushInterval = 20 * time.Millisecond
 	cfg.Raw.Transactions = []RawTransactionConfig{{
 		Name:     "device.firmware",
 		CobID:    0x51E,

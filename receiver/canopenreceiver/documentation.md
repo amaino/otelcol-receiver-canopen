@@ -124,12 +124,16 @@ event is attributable to a specific node.
   in `raw.sniff.cob_ids`.
 - **Emitted**: once per matched frame, with no protocol interpretation.
 - **Severity**: Info
+- **Attributes**: `canopen.cob_id` (hex string) and `canopen.raw.data`
+  (uppercase hexadecimal payload).
 
 ### Raw transactions
 
-Raw transactions use `sniff.raw.transactions[]` to send a configured request,
+Raw transactions use `raw.transactions[]` to send a configured request,
 wait for a matching response COB-ID, decode its configured fields, and emit
 metrics/logs. This is protocol-agnostic request/response support; vendor
 payloads and field names belong in deployment configuration.
-- **Attributes**: `canopen.cob_id` (hex string), `canopen.raw.data`
-  (uppercase hexadecimal payload).
+- **Attributes**: `canopen.cob_id` (hex string),
+  `canopen.raw.transaction` (configured transaction name), and each logged
+  field's static `attributes:`. Decoded field values are in the log body,
+  as a scalar for one field or a structured map for multiple fields.

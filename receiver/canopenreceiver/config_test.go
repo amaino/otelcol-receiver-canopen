@@ -167,7 +167,7 @@ func TestConfig_Validate_SDOPollRejectsMultipleChannelsForPolledNode(t *testing.
 		NodeID: 1, Index: 0x20F0, SubIndex: 0x11,
 		Fields: []FieldConfig{{Name: "firmware", Type: codec.Uint32}},
 	}}
-	require.ErrorContains(t, cfg.Validate(), "multiple channels")
+	require.ErrorContains(t, cfg.Validate(), "sdo.sniff.channels: node_id 1 has multiple channels")
 }
 
 func TestConfig_Validate_SDOObjectRequiresMetricsEnabled(t *testing.T) {
@@ -293,7 +293,7 @@ func TestConfig_Validate_SDOPollRejectsConflictingSniffMapping(t *testing.T) {
 		NodeID: 1, Index: 0x20F0, SubIndex: 0x11,
 		Fields: []FieldConfig{{Name: "poll.firmware", Type: codec.Uint32, Logs: true}},
 	}}
-	require.ErrorContains(t, cfg.Validate(), "configuration conflicts with passive object")
+	require.ErrorContains(t, cfg.Validate(), "sdo.poll.objects[0]: configuration conflicts with passive object")
 }
 
 func TestConfig_Validate_SDOPollAllowsIdenticalSniffMapping(t *testing.T) {
@@ -397,17 +397,17 @@ func TestConfig_Validate_RawTransactionsRejectOverlappingResponseMatches(t *test
 			},
 		}
 	}
-	cfg.Raw.Transactions = []RawTransactionConfig{
-		makeTransaction("transaction.one"),
-		makeTransaction("transaction.two"),
-	}
+	first := makeTransaction("transaction.one")
+	second := makeTransaction("transaction.two")
+	second.Payload = []byte{2}
+	cfg.Raw.Transactions = []RawTransactionConfig{first, second}
 	require.ErrorContains(t, cfg.Validate(), "response.match overlaps transaction")
 }
 
 func TestConfig_Validate_RawTransactionsAllowDisjointResponseMatches(t *testing.T) {
 	makeTransaction := func(name string, match RawMatchByte) RawTransactionConfig {
 		return RawTransactionConfig{
-			Name: name, CobID: 0x501, Payload: []byte{1}, Timeout: time.Second, Interval: time.Hour,
+			Name: name, CobID: 0x501, Payload: []byte{match.Value}, Timeout: time.Second, Interval: time.Hour,
 			Response: RawResponseConfig{
 				CobID:  0x481,
 				Match:  []RawMatchByte{match},

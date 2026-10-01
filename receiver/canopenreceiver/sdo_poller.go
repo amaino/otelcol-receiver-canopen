@@ -6,6 +6,8 @@ import (
 	"sync"
 	"time"
 
+	"go.uber.org/zap"
+
 	"github.com/amaino/otelcol-receiver-canopen/receiver/canopenreceiver/internal/cantransport"
 )
 
@@ -66,7 +68,7 @@ func (p *sdoPoller) run() {
 	}
 }
 
-func (p *sdoPoller) pollUntilSuccess(object SDOObjectConfig) bool {
+func (p *sdoPoller) pollUntilSuccess(object SDOObjectConfig) {
 	settings := p.receiver.cfg.SDO.Poll
 	attempt := 0
 	backoff := settings.Backoff
@@ -78,15 +80,49 @@ func (p *sdoPoller) pollUntilSuccess(object SDOObjectConfig) bool {
 		maxBackoff = defaultSDOPollMaxBackoff
 	}
 	for {
-		if p.poll(object) {
-			return true
-		}
-		if !settings.Retry || (settings.MaxRetries != nil && attempt >= *settings.MaxRetries) {
-			return false
-		}
 		attempt++
+		result := p.poll(object)
+		if result.ok {
+			if attempt > 1 {
+				p.receiver.settings.Logger.Info("canopen: SDO poll recovered after retry",
+					zap.Uint("node_id", uint(object.NodeID)),
+					zap.Uint("index", uint(object.Index)),
+					zap.Uint("sub_index", uint(object.SubIndex)),
+					zap.Int("attempts", attempt),
+				)
+			}
+			return
+		}
+		if p.ctx.Err() != nil {
+			return
+		}
+		retriesRemain := settings.MaxRetries == nil || attempt-1 < *settings.MaxRetries
+		if !settings.Retry || !retriesRemain {
+			failureMessage := "canopen: SDO poll failed; retries disabled"
+			if settings.Retry {
+				failureMessage = "canopen: SDO poll failed; retry limit reached"
+			}
+			p.receiver.settings.Logger.Warn(failureMessage,
+				zap.Uint("node_id", uint(object.NodeID)),
+				zap.Uint("index", uint(object.Index)),
+				zap.Uint("sub_index", uint(object.SubIndex)),
+				zap.Int("attempts", attempt),
+				zap.Bool("retry_enabled", settings.Retry),
+				zap.Error(result.err),
+			)
+			return
+		}
+		p.receiver.settings.Logger.Warn("canopen: SDO poll attempt failed; retry scheduled",
+			zap.Uint("node_id", uint(object.NodeID)),
+			zap.Uint("index", uint(object.Index)),
+			zap.Uint("sub_index", uint(object.SubIndex)),
+			zap.Int("attempt", attempt),
+			zap.Int("retry", attempt),
+			zap.Duration("retry_delay", backoff),
+			zap.Error(result.err),
+		)
 		if !waitContext(p.ctx, backoff) {
-			return false
+			return
 		}
 		backoff *= 2
 		if backoff > maxBackoff {
@@ -95,7 +131,7 @@ func (p *sdoPoller) pollUntilSuccess(object SDOObjectConfig) bool {
 	}
 }
 
-func (p *sdoPoller) poll(object SDOObjectConfig) bool {
+func (p *sdoPoller) poll(object SDOObjectConfig) sdoPollResult {
 	channel, ok := p.channels[object.NodeID]
 	if !ok {
 		channel = SDOChannelConfig{
@@ -123,7 +159,7 @@ func (p *sdoPoller) poll(object SDOObjectConfig) bool {
 	}()
 
 	if err := p.receiver.sendPollFrame(p.ctx, request); err != nil {
-		return false
+		return sdoPollResult{err: fmt.Errorf("send request: %w", err)}
 	}
 	timeout := p.receiver.cfg.SDO.Poll.Timeout
 	if timeout == 0 {
@@ -133,11 +169,11 @@ func (p *sdoPoller) poll(object SDOObjectConfig) bool {
 	defer timer.Stop()
 	select {
 	case result := <-active.result:
-		return result.ok
+		return result
 	case <-timer.C:
-		return false
+		return sdoPollResult{err: fmt.Errorf("response timed out after %s", timeout)}
 	case <-p.ctx.Done():
-		return false
+		return sdoPollResult{err: p.ctx.Err()}
 	}
 }
 
