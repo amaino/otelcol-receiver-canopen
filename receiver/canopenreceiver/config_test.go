@@ -24,6 +24,7 @@ func TestLoadConfig(t *testing.T) {
 	assert.True(t, cfg.Metrics.Enabled)
 	assert.Equal(t, 10*time.Second, cfg.Metrics.FlushInterval)
 	assert.True(t, cfg.Logs.Enabled)
+	assert.Equal(t, 10*time.Second, cfg.Logs.FlushInterval)
 
 	assert.True(t, cfg.Heartbeat.Logs)
 	assert.True(t, cfg.EMCY.Metrics)
@@ -393,6 +394,46 @@ func TestConfig_Validate_RawTransactionDuplicateName(t *testing.T) {
 	}
 	other := txn
 	other.CobID = 0x51F
+	cfg.Raw.Transactions = []RawTransactionConfig{txn, other}
+	require.Error(t, cfg.Validate())
+}
+
+// Multiple transactions can legitimately share one request cob_id
+func TestConfig_Validate_RawTransactionSameCobIDDifferentPayloadOK(t *testing.T) {
+	cfg := validBaseConfig()
+	txn := RawTransactionConfig{
+		Name:     "mcu.firmware_part_no",
+		CobID:    0x51E,
+		Payload:  []uint8{0x08, 0x80},
+		Timeout:  time.Second,
+		Interval: time.Hour,
+		Response: RawResponseConfig{
+			CobID:  0x49E,
+			Fields: []FieldConfig{{Name: "mcu.firmware_version", Type: codec.Uint32, Logs: true}},
+		},
+	}
+	other := txn
+	other.Name = "mcu.backup_checksum.driver"
+	other.Payload = []uint8{0x37, 0x80, 0x07, 0x04}
+	cfg.Raw.Transactions = []RawTransactionConfig{txn, other}
+	require.NoError(t, cfg.Validate())
+}
+
+func TestConfig_Validate_RawTransactionDuplicateRequest(t *testing.T) {
+	cfg := validBaseConfig()
+	txn := RawTransactionConfig{
+		Name:     "mcu.firmware_part_no",
+		CobID:    0x51E,
+		Payload:  []uint8{0x08, 0x80},
+		Timeout:  time.Second,
+		Interval: time.Hour,
+		Response: RawResponseConfig{
+			CobID:  0x49E,
+			Fields: []FieldConfig{{Name: "mcu.firmware_version", Type: codec.Uint32, Logs: true}},
+		},
+	}
+	other := txn
+	other.Name = "mcu.firmware_part_no_again"
 	cfg.Raw.Transactions = []RawTransactionConfig{txn, other}
 	require.Error(t, cfg.Validate())
 }

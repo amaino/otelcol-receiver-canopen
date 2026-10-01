@@ -149,6 +149,10 @@ func (r *canopenReceiver) doStart(ctx context.Context) error {
 		r.wg.Add(1)
 		go r.metricsFlushLoop(runCtx)
 	}
+	if r.cfg.Logs.Enabled {
+		r.wg.Add(1)
+		go r.logsFlushLoop(runCtx)
+	}
 
 	return nil
 }
@@ -243,6 +247,21 @@ func (r *canopenReceiver) metricsFlushLoop(ctx context.Context) {
 			return
 		case <-ticker.C:
 			r.flushMetrics(ctx)
+		}
+	}
+}
+
+// logsFlushLoop is independent of metricsFlushLoop so logs keep flowing on
+// their own interval regardless of whether metrics are enabled.
+func (r *canopenReceiver) logsFlushLoop(ctx context.Context) {
+	defer r.wg.Done()
+	ticker := time.NewTicker(r.cfg.Logs.FlushInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
 			r.flushLogs(ctx)
 		}
 	}

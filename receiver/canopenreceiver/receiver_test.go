@@ -33,6 +33,7 @@ func TestReceiver_EndToEnd_SniffPDOAndEMCY(t *testing.T) {
 	cfg.Interface = "vcan0"
 	cfg.ReadTimeout = 50 * time.Millisecond
 	cfg.Metrics.FlushInterval = 100 * time.Millisecond
+	cfg.Logs.FlushInterval = 100 * time.Millisecond
 	cfg.EMCY.Logs = true
 	cfg.PDO = []PDOConfig{
 		{
@@ -73,4 +74,85 @@ func TestReceiver_EndToEnd_SniffPDOAndEMCY(t *testing.T) {
 	ld := logsSink.AllLogs()[0]
 	lr := ld.ResourceLogs().At(0).ScopeLogs().At(0).LogRecords().At(0)
 	assert.Contains(t, lr.Body().Str(), "emergency")
+}
+
+// Regression test: metrics and logs each flush on their own schedule,
+// independent of whether the other signal is enabled. Previously the only
+// flush loop started by doStart was gated on cfg.Metrics.Enabled, so
+// disabling metrics silently stopped logs from ever being flushed too.
+func TestReceiver_MetricsAndLogsFlushIndependently(t *testing.T) {
+	tests := []struct {
+		name           string
+		metricsEnabled bool
+		logsEnabled    bool
+	}{
+		{name: "both enabled", metricsEnabled: true, logsEnabled: true},
+		{name: "metrics disabled", metricsEnabled: false, logsEnabled: true},
+		{name: "logs disabled", metricsEnabled: true, logsEnabled: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			bus := cantransport.NewFakeBus()
+
+			cfg := createDefaultConfig().(*Config)
+			cfg.Interface = "vcan0"
+			cfg.ReadTimeout = 50 * time.Millisecond
+			cfg.Metrics.Enabled = tt.metricsEnabled
+			cfg.Metrics.FlushInterval = 100 * time.Millisecond
+			cfg.Logs.Enabled = tt.logsEnabled
+			cfg.Logs.FlushInterval = 100 * time.Millisecond
+			cfg.PDO = []PDOConfig{
+				{
+					Name:  "motor_tpdo1",
+					CobID: 0x181,
+					Fields: []FieldConfig{
+						{Name: "canopen.motor.speed.metric", Type: codec.Int16, Scale: 0.1, Metrics: tt.metricsEnabled},
+						{Name: "canopen.motor.speed.log", Type: codec.Int16, Scale: 0.1, Logs: tt.logsEnabled},
+					},
+				},
+			}
+			require.NoError(t, cfg.Validate())
+
+			set := receivertest.NewNopSettings(metadata.Type)
+			r := newCanopenReceiver(cfg, set, fakeBusDialer{bus: bus})
+
+			metricsSink := new(consumertest.MetricsSink)
+			logsSink := new(consumertest.LogsSink)
+			r.metricsConsumer = metricsSink
+			r.logsConsumer = logsSink
+
+			require.NoError(t, r.Start(context.Background(), componenttest.NewNopHost()))
+			defer func() { require.NoError(t, r.Shutdown(context.Background())) }()
+
+			// Inject a PDO frame: int16 le 1234 -> bytes D2 04
+			bus.Inject(cantransport.Frame{ID: 0x181, Data: []byte{0xD2, 0x04}})
+
+			// Wait on whichever signal(s) are enabled; a disabled signal has
+			// no flush loop at all, so by the time the enabled one(s) flush,
+			// a disabled signal coupled to the same ticker (the bug) would
+			// already have emitted too.
+			if tt.metricsEnabled {
+				require.Eventually(t, func() bool {
+					return len(metricsSink.AllMetrics()) > 0
+				}, 3*time.Second, 20*time.Millisecond)
+			}
+			if tt.logsEnabled {
+				require.Eventually(t, func() bool {
+					return len(logsSink.AllLogs()) > 0
+				}, 3*time.Second, 20*time.Millisecond)
+			}
+
+			if tt.metricsEnabled {
+				require.NotEmpty(t, metricsSink.AllMetrics())
+			} else {
+				assert.Empty(t, metricsSink.AllMetrics(), "metrics must not be emitted when metrics.enabled=false")
+			}
+			if tt.logsEnabled {
+				require.NotEmpty(t, logsSink.AllLogs())
+			} else {
+				assert.Empty(t, logsSink.AllLogs(), "logs must not be emitted when logs.enabled=false")
+			}
+		})
+	}
 }
