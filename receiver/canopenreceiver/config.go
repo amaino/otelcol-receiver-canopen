@@ -504,7 +504,7 @@ func (r *RawConfig) validate() error {
 		return err
 	}
 	seenNames := make(map[string]struct{}, len(r.Transactions))
-	seenCobIDs := make(map[uint32]struct{}, len(r.Transactions))
+	seenRequests := make(map[string]struct{}, len(r.Transactions))
 	for i := range r.Transactions {
 		if err := r.Transactions[i].validate(); err != nil {
 			return fmt.Errorf("raw.transactions[%d]: %w", i, err)
@@ -513,10 +513,13 @@ func (r *RawConfig) validate() error {
 			return fmt.Errorf("raw.transactions: duplicate name %q", r.Transactions[i].Name)
 		}
 		seenNames[r.Transactions[i].Name] = struct{}{}
-		if _, dup := seenCobIDs[r.Transactions[i].CobID]; dup {
-			return fmt.Errorf("raw.transactions: duplicate cob_id 0x%X", r.Transactions[i].CobID)
+		// Multiple transactions can legitimately share one request cob_id
+		// (cob_id, payload) pair identifies a genuine duplicate.
+		requestKey := fmt.Sprintf("0x%X:%X", r.Transactions[i].CobID, r.Transactions[i].Payload)
+		if _, dup := seenRequests[requestKey]; dup {
+			return fmt.Errorf("raw.transactions: duplicate request cob_id 0x%X payload %X", r.Transactions[i].CobID, r.Transactions[i].Payload)
 		}
-		seenCobIDs[r.Transactions[i].CobID] = struct{}{}
+		seenRequests[requestKey] = struct{}{}
 	}
 	return nil
 }
@@ -560,7 +563,18 @@ func (m *MetricsConfig) validate() error {
 
 // LogsConfig configures the logs signal of this receiver.
 type LogsConfig struct {
-	Enabled bool `mapstructure:"enabled"`
+	Enabled       bool          `mapstructure:"enabled"`
+	FlushInterval time.Duration `mapstructure:"flush_interval"`
+}
+
+func (l *LogsConfig) validate() error {
+	if !l.Enabled {
+		return nil
+	}
+	if l.FlushInterval <= 0 {
+		return errors.New("logs: flush_interval must be > 0 when logs is enabled")
+	}
+	return nil
 }
 
 // Config is the configuration for the CANopen receiver. sdo, pdo, and raw
@@ -602,6 +616,9 @@ func (cfg *Config) Validate() error {
 		return errors.New("at least one of metrics or logs must be enabled")
 	}
 	if err := cfg.Metrics.validate(); err != nil {
+		return err
+	}
+	if err := cfg.Logs.validate(); err != nil {
 		return err
 	}
 	if err := cfg.Heartbeat.validate("heartbeat"); err != nil {
@@ -691,7 +708,8 @@ func createDefaultConfig() component.Config {
 			FlushInterval: 10 * time.Second,
 		},
 		Logs: LogsConfig{
-			Enabled: true,
+			Enabled:       true,
+			FlushInterval: 10 * time.Second,
 		},
 	}
 }
