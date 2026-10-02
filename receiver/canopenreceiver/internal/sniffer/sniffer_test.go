@@ -233,6 +233,23 @@ func TestSniffer_TypedSDOObjectStruct(t *testing.T) {
 	assert.InDelta(t, float64(0x11223344), body["impact.pin_code"].(float64), 0.001)
 }
 
+func TestSniffer_DuplicateSDOObjectEmitsOnce(t *testing.T) {
+	s := New(Config{
+		InterfaceName: "can0",
+		SDOObjects: []SDOObjectDef{
+			{NodeID: 1, Index: 0x20F0, SubIndex: 0x11, Fields: []Field{{Name: "device.firmware", Type: codec.Uint32, EmitMetric: true}}},
+			{NodeID: 1, Index: 0x20F0, SubIndex: 0x11, Fields: []Field{{Name: "device.firmware", Type: codec.Uint32, EmitMetric: true}}},
+		},
+	})
+	metrics := emit.NewMetricsBuilder()
+	s.HandleFrame(cantransport.Frame{ID: 0x601, Data: []byte{0x40, 0xF0, 0x20, 0x11, 0, 0, 0, 0}}, metrics, nil)
+	s.HandleFrame(cantransport.Frame{ID: 0x581, Data: []byte{0x43, 0xF0, 0x20, 0x11, 0x1E, 0xB9, 0x75, 0x00}}, metrics, nil)
+
+	metricList := metrics.Emit().ResourceMetrics().At(0).ScopeMetrics().At(0).Metrics()
+	require.Equal(t, 1, metricList.Len())
+	assert.Equal(t, "device.firmware", metricList.At(0).Name())
+}
+
 func TestSniffer_SDOReassemblesSegmentedUpload(t *testing.T) {
 	s := New(Config{
 		InterfaceName: "can0",

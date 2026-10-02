@@ -10,6 +10,8 @@ import (
 	"go.opentelemetry.io/collector/component/componenttest"
 	"go.opentelemetry.io/collector/consumer/consumertest"
 	"go.opentelemetry.io/collector/receiver/receivertest"
+	"go.uber.org/zap"
+	"go.uber.org/zap/zaptest/observer"
 
 	"github.com/amaino/otelcol-receiver-canopen/receiver/canopenreceiver/internal/cantransport"
 	"github.com/amaino/otelcol-receiver-canopen/receiver/canopenreceiver/internal/codec"
@@ -32,8 +34,6 @@ func TestReceiver_EndToEnd_SniffPDOAndEMCY(t *testing.T) {
 	cfg := createDefaultConfig().(*Config)
 	cfg.Interface = "vcan0"
 	cfg.ReadTimeout = 50 * time.Millisecond
-	cfg.Metrics.FlushInterval = 100 * time.Millisecond
-	cfg.Logs.FlushInterval = 100 * time.Millisecond
 	cfg.EMCY.Logs = true
 	cfg.PDO = []PDOConfig{
 		{
@@ -76,11 +76,8 @@ func TestReceiver_EndToEnd_SniffPDOAndEMCY(t *testing.T) {
 	assert.Contains(t, lr.Body().Str(), "emergency")
 }
 
-// Regression test: metrics and logs each flush on their own schedule,
-// independent of whether the other signal is enabled. Previously the only
-// flush loop started by doStart was gated on cfg.Metrics.Enabled, so
-// disabling metrics silently stopped logs from ever being flushed too.
-func TestReceiver_MetricsAndLogsFlushIndependently(t *testing.T) {
+// Enabled signals are consumed independently for each decoded frame.
+func TestReceiver_ConsumesEnabledSignals(t *testing.T) {
 	tests := []struct {
 		name           string
 		metricsEnabled bool
@@ -99,9 +96,7 @@ func TestReceiver_MetricsAndLogsFlushIndependently(t *testing.T) {
 			cfg.Interface = "vcan0"
 			cfg.ReadTimeout = 50 * time.Millisecond
 			cfg.Metrics.Enabled = tt.metricsEnabled
-			cfg.Metrics.FlushInterval = 100 * time.Millisecond
 			cfg.Logs.Enabled = tt.logsEnabled
-			cfg.Logs.FlushInterval = 100 * time.Millisecond
 			cfg.PDO = []PDOConfig{
 				{
 					Name:  "motor_tpdo1",
@@ -128,10 +123,7 @@ func TestReceiver_MetricsAndLogsFlushIndependently(t *testing.T) {
 			// Inject a PDO frame: int16 le 1234 -> bytes D2 04
 			bus.Inject(cantransport.Frame{ID: 0x181, Data: []byte{0xD2, 0x04}})
 
-			// Wait on whichever signal(s) are enabled; a disabled signal has
-			// no flush loop at all, so by the time the enabled one(s) flush,
-			// a disabled signal coupled to the same ticker (the bug) would
-			// already have emitted too.
+			// Wait only for enabled signals; disabled outputs must stay empty.
 			if tt.metricsEnabled {
 				require.Eventually(t, func() bool {
 					return len(metricsSink.AllMetrics()) > 0
@@ -155,4 +147,447 @@ func TestReceiver_MetricsAndLogsFlushIndependently(t *testing.T) {
 			}
 		})
 	}
+}
+func TestReceiver_SDOUploadPollOnce(t *testing.T) {
+	bus := cantransport.NewFakeBus()
+	monitor, err := bus.Dial(context.Background(), "vcan0")
+	require.NoError(t, err)
+	defer monitor.Close()
+
+	cfg := createDefaultConfig().(*Config)
+	cfg.Interface = "vcan0"
+	cfg.ReadTimeout = 20 * time.Millisecond
+	cfg.Metrics.Enabled = false
+	cfg.Logs.Enabled = true
+	cfg.SDO.Sniff.Channels = []SDOChannelConfig{{
+		NodeID: 1, ClientToServerCobID: 0x601, ServerToClientCobID: 0x581,
+	}}
+	cfg.SDO.Poll = SDOPollConfig{
+		Mode:    "once",
+		Timeout: time.Second,
+		Objects: []SDOObjectConfig{{
+			NodeID: 1, Index: 0x2001, SubIndex: 0,
+			Fields: []FieldConfig{{Name: "device.value", Type: codec.Uint16, Logs: true}},
+		}},
+	}
+	require.NoError(t, cfg.Validate())
+
+	set := receivertest.NewNopSettings(metadata.Type)
+	r := newCanopenReceiver(cfg, set, fakeBusDialer{bus: bus})
+	logsSink := new(consumertest.LogsSink)
+	r.logsConsumer = logsSink
+	require.NoError(t, r.Start(context.Background(), componenttest.NewNopHost()))
+	defer func() { require.NoError(t, r.Shutdown(context.Background())) }()
+
+	recvCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	request, err := monitor.Recv(recvCtx)
+	require.NoError(t, err)
+	assert.Equal(t, uint32(0x601), request.ID)
+	assert.Equal(t, []byte{0x40, 0x01, 0x20, 0, 0, 0, 0, 0}, request.Data)
+
+	bus.Inject(cantransport.Frame{ID: 0x581, Data: []byte{0x4B, 0x01, 0x20, 0, 0x34, 0x12, 0, 0}})
+	require.Eventually(t, func() bool { return len(logsSink.AllLogs()) > 0 }, time.Second, 10*time.Millisecond)
+	log := logsSink.AllLogs()[0].ResourceLogs().At(0).ScopeLogs().At(0).LogRecords().At(0)
+	assert.InDelta(t, float64(0x1234), log.Body().Double(), 0.001)
+}
+
+func TestReceiver_SDOUploadPollSegmented(t *testing.T) {
+	bus := cantransport.NewFakeBus()
+	monitor, err := bus.Dial(context.Background(), "vcan0")
+	require.NoError(t, err)
+	defer monitor.Close()
+
+	cfg := createDefaultConfig().(*Config)
+	cfg.Interface = "vcan0"
+	cfg.ReadTimeout = 20 * time.Millisecond
+	cfg.Metrics.Enabled = false
+	cfg.SDO.Poll = SDOPollConfig{
+		Mode:    "once",
+		Timeout: time.Second,
+		Objects: []SDOObjectConfig{{
+			NodeID: 1, Index: 0x2001, SubIndex: 0,
+			Fields: []FieldConfig{{Name: "device.text", Type: codec.VisibleString, ByteLen: 11, Logs: true}},
+		}},
+	}
+	require.NoError(t, cfg.Validate())
+
+	set := receivertest.NewNopSettings(metadata.Type)
+	r := newCanopenReceiver(cfg, set, fakeBusDialer{bus: bus})
+	logsSink := new(consumertest.LogsSink)
+	r.logsConsumer = logsSink
+	require.NoError(t, r.Start(context.Background(), componenttest.NewNopHost()))
+	defer func() { require.NoError(t, r.Shutdown(context.Background())) }()
+
+	recvCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	waitForData := func(expected []byte) {
+		t.Helper()
+		for {
+			frame, receiveErr := monitor.Recv(recvCtx)
+			require.NoError(t, receiveErr)
+			if assert.ObjectsAreEqual(expected, frame.Data) {
+				return
+			}
+		}
+	}
+	request, err := monitor.Recv(recvCtx)
+	require.NoError(t, err)
+	assert.Equal(t, []byte{0x40, 0x01, 0x20, 0, 0, 0, 0, 0}, request.Data)
+
+	bus.Inject(cantransport.Frame{ID: 0x581, Data: []byte{0x41, 0x01, 0x20, 0, 0x0B, 0, 0, 0}})
+	waitForData([]byte{0x60, 0, 0, 0, 0, 0, 0, 0})
+
+	bus.Inject(cantransport.Frame{ID: 0x581, Data: []byte{0x00, 'h', 'e', 'l', 'l', 'o', ' ', 'w'}})
+	waitForData([]byte{0x70, 0, 0, 0, 0, 0, 0, 0})
+	bus.Inject(cantransport.Frame{ID: 0x581, Data: []byte{0x17, 'o', 'r', 'l', 'd', 0, 0, 0}})
+
+	require.Eventually(t, func() bool { return len(logsSink.AllLogs()) > 0 }, time.Second, 10*time.Millisecond)
+	log := logsSink.AllLogs()[0].ResourceLogs().At(0).ScopeLogs().At(0).LogRecords().At(0)
+	assert.Equal(t, "hello world", log.Body().Str())
+}
+
+func TestReceiver_SDOUploadPollRetriesAfterAbort(t *testing.T) {
+	bus := cantransport.NewFakeBus()
+	monitor, err := bus.Dial(context.Background(), "vcan0")
+	require.NoError(t, err)
+	defer monitor.Close()
+
+	cfg := createDefaultConfig().(*Config)
+	cfg.Interface = "vcan0"
+	cfg.ReadTimeout = 20 * time.Millisecond
+	cfg.Metrics.Enabled = false
+	cfg.SDO.Poll = SDOPollConfig{
+		Mode:       "once",
+		Timeout:    100 * time.Millisecond,
+		Retry:      true,
+		Backoff:    time.Millisecond,
+		MaxBackoff: time.Millisecond,
+		MaxRetries: intPointer(1),
+		Objects: []SDOObjectConfig{{
+			NodeID: 1, Index: 0x2001, SubIndex: 0,
+			Fields: []FieldConfig{{Name: "device.value", Type: codec.Uint16}},
+		}},
+	}
+	require.NoError(t, cfg.Validate())
+
+	set := receivertest.NewNopSettings(metadata.Type)
+	logCore, observedLogs := observer.New(zap.DebugLevel)
+	set.Logger = zap.New(logCore)
+	r := newCanopenReceiver(cfg, set, fakeBusDialer{bus: bus})
+	require.NoError(t, r.Start(context.Background(), componenttest.NewNopHost()))
+	defer func() { require.NoError(t, r.Shutdown(context.Background())) }()
+
+	recvCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	firstRequest, err := monitor.Recv(recvCtx)
+	require.NoError(t, err)
+	assert.Equal(t, uint32(0x601), firstRequest.ID)
+
+	bus.Inject(cantransport.Frame{ID: 0x581, Data: []byte{0x80, 0x01, 0x20, 0, 0, 0, 0x02, 0x06}})
+	waitForFrameData(t, recvCtx, monitor, firstRequest.Data)
+
+	bus.Inject(cantransport.Frame{ID: 0x581, Data: []byte{0x4B, 0x01, 0x20, 0, 0x34, 0x12, 0, 0}})
+
+	require.Eventually(t, func() bool {
+		return len(observedLogs.FilterMessage("canopen: SDO poll recovered after retry").All()) == 1
+	}, time.Second, 10*time.Millisecond)
+	entries := observedLogs.All()
+	require.Len(t, entries, 2)
+	assert.Equal(t, "canopen: SDO poll attempt failed; retry scheduled", entries[0].Message)
+	assert.Contains(t, entries[0].ContextMap()["error"], "SDO abort for 0x2001:00")
+	assert.Equal(t, "canopen: SDO poll recovered after retry", entries[1].Message)
+	assert.Equal(t, int64(2), entries[1].ContextMap()["attempts"])
+}
+
+func TestSDOPoller_IgnoresAbortForDifferentObject(t *testing.T) {
+	active := &activeSDOPoll{
+		object:      SDOObjectConfig{NodeID: 1, Index: 0x2001, SubIndex: 0},
+		serverCobID: 0x581,
+		result:      make(chan sdoPollResult, 1),
+	}
+	poller := &sdoPoller{active: active}
+
+	poller.handleFrame(cantransport.Frame{ID: 0x581, Data: []byte{0x80, 0x02, 0x20, 0x00, 0, 0, 2, 6}})
+	select {
+	case result := <-active.result:
+		t.Fatalf("unrelated abort completed active poll: %+v", result)
+	default:
+	}
+
+	poller.handleFrame(cantransport.Frame{ID: 0x581, Data: []byte{0x80, 0x01, 0x20, 0x00, 0, 0, 2, 6}})
+	select {
+	case result := <-active.result:
+		assert.False(t, result.ok)
+	case <-time.After(time.Second):
+		t.Fatal("matching abort did not complete active poll")
+	}
+}
+
+func TestReceiver_SDOUploadPollTimeoutDoesNotEmitValue(t *testing.T) {
+	bus := cantransport.NewFakeBus()
+	monitor, err := bus.Dial(context.Background(), "vcan0")
+	require.NoError(t, err)
+	defer monitor.Close()
+
+	cfg := createDefaultConfig().(*Config)
+	cfg.Interface = "vcan0"
+	cfg.ReadTimeout = 20 * time.Millisecond
+	cfg.Metrics.Enabled = false
+	cfg.Logs.Enabled = true
+	cfg.SDO.Poll = SDOPollConfig{
+		Mode:    "once",
+		Timeout: 50 * time.Millisecond,
+		Objects: []SDOObjectConfig{{
+			NodeID: 1, Index: 0x2001, SubIndex: 0,
+			Fields: []FieldConfig{{Name: "device.value", Type: codec.Uint16, Logs: true}},
+		}},
+	}
+	require.NoError(t, cfg.Validate())
+
+	set := receivertest.NewNopSettings(metadata.Type)
+	logCore, observedLogs := observer.New(zap.DebugLevel)
+	set.Logger = zap.New(logCore)
+	r := newCanopenReceiver(cfg, set, fakeBusDialer{bus: bus})
+	logsSink := new(consumertest.LogsSink)
+	r.logsConsumer = logsSink
+	require.NoError(t, r.Start(context.Background(), componenttest.NewNopHost()))
+	defer func() { require.NoError(t, r.Shutdown(context.Background())) }()
+
+	recvCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	request, err := monitor.Recv(recvCtx)
+	require.NoError(t, err)
+	assert.Equal(t, uint32(0x601), request.ID)
+	assert.Equal(t, []byte{0x40, 0x01, 0x20, 0, 0, 0, 0, 0}, request.Data)
+
+	require.Never(t, func() bool { return len(logsSink.AllLogs()) > 0 }, 200*time.Millisecond, 10*time.Millisecond)
+
+	noReplyCtx, stopWaiting := context.WithTimeout(context.Background(), 150*time.Millisecond)
+	defer stopWaiting()
+	_, err = monitor.Recv(noReplyCtx)
+	assert.ErrorIs(t, err, context.DeadlineExceeded)
+
+	require.Eventually(t, func() bool {
+		return len(observedLogs.FilterMessage("canopen: SDO poll failed; retries disabled").All()) == 1
+	}, time.Second, 10*time.Millisecond)
+	entries := observedLogs.FilterMessage("canopen: SDO poll failed; retries disabled").All()
+	require.Len(t, entries, 1)
+	assert.Contains(t, entries[0].ContextMap()["error"], "response timed out")
+}
+
+func TestReceiver_SDOUploadPollInterval(t *testing.T) {
+	bus := cantransport.NewFakeBus()
+	monitor, err := bus.Dial(context.Background(), "vcan0")
+	require.NoError(t, err)
+	defer monitor.Close()
+
+	cfg := createDefaultConfig().(*Config)
+	cfg.Interface = "vcan0"
+	cfg.ReadTimeout = 20 * time.Millisecond
+	cfg.SDO.Poll = SDOPollConfig{
+		Mode:     "interval",
+		Interval: 30 * time.Millisecond,
+		Timeout:  time.Second,
+		Objects: []SDOObjectConfig{{
+			NodeID: 1, Index: 0x2001, SubIndex: 0,
+			Fields: []FieldConfig{{Name: "device.value", Type: codec.Uint16}},
+		}},
+	}
+	require.NoError(t, cfg.Validate())
+
+	set := receivertest.NewNopSettings(metadata.Type)
+	r := newCanopenReceiver(cfg, set, fakeBusDialer{bus: bus})
+	require.NoError(t, r.Start(context.Background(), componenttest.NewNopHost()))
+	defer func() { require.NoError(t, r.Shutdown(context.Background())) }()
+
+	recvCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	firstRequest, err := monitor.Recv(recvCtx)
+	require.NoError(t, err)
+	assert.Equal(t, uint32(0x601), firstRequest.ID)
+	bus.Inject(cantransport.Frame{ID: 0x581, Data: []byte{0x4B, 0x01, 0x20, 0, 0x34, 0x12, 0, 0}})
+
+	waitForFrameData(t, recvCtx, monitor, firstRequest.Data)
+}
+
+func waitForFrameData(t *testing.T, ctx context.Context, conn cantransport.Conn, expected []byte) {
+	t.Helper()
+	for {
+		frame, err := conn.Recv(ctx)
+		require.NoError(t, err)
+		if assert.ObjectsAreEqual(expected, frame.Data) {
+			return
+		}
+	}
+}
+
+func intPointer(value int) *int {
+	return &value
+}
+
+func TestReceiver_RawTransactionPoll(t *testing.T) {
+	bus := cantransport.NewFakeBus()
+	monitor, err := bus.Dial(context.Background(), "vcan0")
+	require.NoError(t, err)
+	defer monitor.Close()
+
+	cfg := createDefaultConfig().(*Config)
+	cfg.Interface = "vcan0"
+	cfg.ReadTimeout = 20 * time.Millisecond
+	cfg.Metrics.Enabled = false
+	cfg.Raw.Transactions = []RawTransactionConfig{{
+		Name:     "device.firmware",
+		CobID:    0x51E,
+		Payload:  []byte{0x08, 0x80},
+		Timeout:  time.Second,
+		Interval: time.Hour,
+		Response: RawResponseConfig{
+			CobID:  0x49E,
+			Match:  []RawMatchByte{{ByteOffset: 0, Value: 0x08}, {ByteOffset: 1, Value: 0x80}},
+			Fields: []FieldConfig{{Name: "device.version", BitOffset: 16, Type: codec.Uint32, Logs: true}},
+		},
+	}}
+	cfg.Raw.Sniff.Logs = false
+	cfg.Raw.Sniff.Messages = []RawMessageConfig{{
+		Name:   "passive.firmware",
+		CobID:  0x49E,
+		Match:  []RawMatchByte{{ByteOffset: 0, Value: 0x08}, {ByteOffset: 1, Value: 0x80}},
+		Fields: []FieldConfig{{Name: "passive.firmware", BitOffset: 16, Type: codec.Uint32, Logs: true}},
+	}}
+	require.NoError(t, cfg.Validate())
+
+	set := receivertest.NewNopSettings(metadata.Type)
+	r := newCanopenReceiver(cfg, set, fakeBusDialer{bus: bus})
+	logsSink := new(consumertest.LogsSink)
+	r.logsConsumer = logsSink
+	require.NoError(t, r.Start(context.Background(), componenttest.NewNopHost()))
+	defer func() { require.NoError(t, r.Shutdown(context.Background())) }()
+
+	recvCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	request, err := monitor.Recv(recvCtx)
+	require.NoError(t, err)
+	assert.Equal(t, uint32(0x51E), request.ID)
+	assert.Equal(t, []byte{0x08, 0x80}, request.Data)
+
+	bus.Inject(cantransport.Frame{ID: 0x49E, Data: []byte{0x37, 0x80, 0x07, 0x04, 0, 0, 0, 0}})
+	require.Never(t, func() bool { return len(logsSink.AllLogs()) > 0 }, 50*time.Millisecond, 5*time.Millisecond)
+	bus.Inject(cantransport.Frame{ID: 0x49E, Data: []byte{0x08, 0x80, 0x78, 0x56, 0x34, 0x12, 0, 0}})
+	require.Eventually(t, func() bool { return len(logsSink.AllLogs()) > 0 }, time.Second, 10*time.Millisecond)
+	var recordCount int
+	var transactionRecordFound bool
+	for _, logData := range logsSink.AllLogs() {
+		for resourceIndex := 0; resourceIndex < logData.ResourceLogs().Len(); resourceIndex++ {
+			resourceLogs := logData.ResourceLogs().At(resourceIndex)
+			for scopeIndex := 0; scopeIndex < resourceLogs.ScopeLogs().Len(); scopeIndex++ {
+				records := resourceLogs.ScopeLogs().At(scopeIndex).LogRecords()
+				recordCount += records.Len()
+				for recordIndex := 0; recordIndex < records.Len(); recordIndex++ {
+					record := records.At(recordIndex)
+					if record.Attributes().AsRaw()["canopen.raw.transaction"] == "device.firmware" {
+						transactionRecordFound = true
+					}
+				}
+			}
+		}
+	}
+	assert.Equal(t, 1, recordCount)
+	assert.True(t, transactionRecordFound)
+}
+
+func TestReceiver_RawTransactionOnce(t *testing.T) {
+	bus := cantransport.NewFakeBus()
+	monitor, err := bus.Dial(context.Background(), "vcan0")
+	require.NoError(t, err)
+	defer monitor.Close()
+
+	cfg := createDefaultConfig().(*Config)
+	cfg.Interface = "vcan0"
+	cfg.ReadTimeout = 10 * time.Millisecond
+	cfg.Raw.Transactions = []RawTransactionConfig{{
+		Name: "device.once", CobID: 0x501, Payload: []byte{0x08, 0x80}, Mode: "once", Timeout: time.Second,
+		Response: RawResponseConfig{
+			CobID:  0x481,
+			Match:  []RawMatchByte{{ByteOffset: 0, Value: 0x08}},
+			Fields: []FieldConfig{{Name: "device.value", Type: codec.Uint8}},
+		},
+	}}
+	require.NoError(t, cfg.Validate())
+
+	r := newCanopenReceiver(cfg, receivertest.NewNopSettings(metadata.Type), fakeBusDialer{bus: bus})
+	require.NoError(t, r.Start(context.Background(), componenttest.NewNopHost()))
+	defer func() { require.NoError(t, r.Shutdown(context.Background())) }()
+
+	recvCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	request, err := monitor.Recv(recvCtx)
+	require.NoError(t, err)
+	assert.Equal(t, uint32(0x501), request.ID)
+	assert.Equal(t, []byte{0x08, 0x80}, request.Data)
+
+	response := cantransport.Frame{ID: 0x481, Data: []byte{0x08, 0x55}}
+	bus.Inject(response)
+	waitForFrameData(t, recvCtx, monitor, response.Data)
+	noRepeatCtx, stopWaiting := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer stopWaiting()
+	_, err = monitor.Recv(noRepeatCtx)
+	assert.ErrorIs(t, err, context.DeadlineExceeded)
+}
+
+func TestReceiver_RawTransactionPollRetriesAfterTimeout(t *testing.T) {
+	bus := cantransport.NewFakeBus()
+	monitor, err := bus.Dial(context.Background(), "vcan0")
+	require.NoError(t, err)
+	defer monitor.Close()
+
+	cfg := createDefaultConfig().(*Config)
+	cfg.Interface = "vcan0"
+	cfg.ReadTimeout = 10 * time.Millisecond
+	cfg.Metrics.Enabled = false
+	cfg.Raw.Transactions = []RawTransactionConfig{{
+		Name:       "device.firmware",
+		CobID:      0x51E,
+		Payload:    []byte{0x08, 0x80},
+		Timeout:    30 * time.Millisecond,
+		Interval:   time.Hour,
+		Retry:      true,
+		Backoff:    time.Millisecond,
+		MaxBackoff: time.Millisecond,
+		MaxRetries: intPointer(1),
+		Response: RawResponseConfig{
+			CobID:  0x49E,
+			Match:  []RawMatchByte{{ByteOffset: 0, Value: 0x08}},
+			Fields: []FieldConfig{{Name: "device.version", BitOffset: 8, Type: codec.Uint32}},
+		},
+	}}
+	require.NoError(t, cfg.Validate())
+
+	settings := receivertest.NewNopSettings(metadata.Type)
+	logCore, observedLogs := observer.New(zap.DebugLevel)
+	settings.Logger = zap.New(logCore)
+	r := newCanopenReceiver(cfg, settings, fakeBusDialer{bus: bus})
+	require.NoError(t, r.Start(context.Background(), componenttest.NewNopHost()))
+	defer func() { require.NoError(t, r.Shutdown(context.Background())) }()
+
+	recvCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	firstRequest, err := monitor.Recv(recvCtx)
+	require.NoError(t, err)
+	secondRequest, err := monitor.Recv(recvCtx)
+	require.NoError(t, err)
+	assert.Equal(t, firstRequest.ID, secondRequest.ID)
+	assert.Equal(t, firstRequest.Data, secondRequest.Data)
+	noMoreRequestsCtx, stopWaiting := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer stopWaiting()
+	_, err = monitor.Recv(noMoreRequestsCtx)
+	assert.ErrorIs(t, err, context.DeadlineExceeded)
+
+	entries := observedLogs.All()
+	require.Len(t, entries, 2)
+	assert.Equal(t, "canopen: raw transaction attempt failed; retry scheduled", entries[0].Message)
+	assert.Equal(t, "device.firmware", entries[0].ContextMap()["transaction"])
+	assert.Equal(t, "canopen: raw transaction failed; retry limit reached", entries[1].Message)
+	assert.Equal(t, int64(2), entries[1].ContextMap()["attempts"])
+
 }

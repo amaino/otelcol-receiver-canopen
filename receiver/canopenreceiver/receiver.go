@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"sync"
-	"time"
 
 	"go.opentelemetry.io/collector/component"
 	"go.opentelemetry.io/collector/consumer"
@@ -34,9 +33,12 @@ type canopenReceiver struct {
 	logsBuilder    *emit.LogsBuilder
 	buildersMu     sync.Mutex
 
-	conn   cantransport.Conn
-	cancel context.CancelFunc
-	wg     sync.WaitGroup
+	conn      cantransport.Conn
+	cancel    context.CancelFunc
+	wg        sync.WaitGroup
+	sendMu    sync.Mutex
+	poller    *sdoPoller
+	rawPoller *rawTransactionPoller
 
 	startOnce    sync.Once
 	shutdownOnce sync.Once
@@ -63,7 +65,7 @@ func buildSnifferConfig(cfg *Config) sniffer.Config {
 		HeartbeatEmitLog:    cfg.Heartbeat.Logs,
 		EMCYEmitMetric:      cfg.EMCY.Metrics,
 		EMCYEmitLog:         cfg.EMCY.Logs,
-		SDOObjects:          make([]sniffer.SDOObjectDef, 0, len(cfg.SDO.Sniff.Objects)),
+		SDOObjects:          make([]sniffer.SDOObjectDef, 0, len(cfg.SDO.Sniff.Objects)+len(cfg.SDO.Poll.Objects)),
 		SDOChannels:         make([]sniffer.SDOChannel, 0, len(cfg.SDO.Sniff.Channels)),
 		RawEmitMetric:       cfg.Raw.Sniff.Metrics,
 		RawEmitLog:          cfg.Raw.Sniff.Logs,
@@ -82,6 +84,12 @@ func buildSnifferConfig(cfg *Config) sniffer.Config {
 			Fields: buildSnifferFields(object.Fields),
 		})
 	}
+	for _, object := range cfg.SDO.Poll.Objects {
+		sc.SDOObjects = append(sc.SDOObjects, sniffer.SDOObjectDef{
+			NodeID: object.NodeID, Index: object.Index, SubIndex: object.SubIndex,
+			Fields: buildSnifferFields(object.Fields),
+		})
+	}
 	for _, id := range cfg.Raw.Sniff.CobIDs {
 		sc.RawCobIDs[id] = struct{}{}
 	}
@@ -93,8 +101,6 @@ func buildSnifferConfig(cfg *Config) sniffer.Config {
 		sc.RawMessages[msg.CobID] = append(sc.RawMessages[msg.CobID], def)
 		sc.RawCobIDs[msg.CobID] = struct{}{}
 	}
-	// cfg.SDO.Poll and cfg.Raw.Transactions are intentionally not read here:
-	// active polling/requests are not implemented yet.
 	for _, pdo := range cfg.PDO {
 		sc.PDOs[pdo.CobID] = sniffer.PDODef{Name: pdo.Name, CobID: pdo.CobID, Fields: buildSnifferFields(pdo.Fields)}
 	}
@@ -144,14 +150,15 @@ func (r *canopenReceiver) doStart(ctx context.Context) error {
 
 	r.wg.Add(1)
 	go r.dispatchLoop(runCtx)
-
-	if r.cfg.Metrics.Enabled {
+	if len(r.cfg.SDO.Poll.Objects) > 0 {
+		r.poller = newSDOPoller(r, runCtx)
 		r.wg.Add(1)
-		go r.metricsFlushLoop(runCtx)
+		go r.poller.run()
 	}
-	if r.cfg.Logs.Enabled {
+	if len(r.cfg.Raw.Transactions) > 0 {
+		r.rawPoller = newRawTransactionPoller(r, runCtx)
 		r.wg.Add(1)
-		go r.logsFlushLoop(runCtx)
+		go r.rawPoller.run()
 	}
 
 	return nil
@@ -182,8 +189,7 @@ func (r *canopenReceiver) doShutdown(ctx context.Context) error {
 	case <-ctx.Done():
 		return ctx.Err()
 	}
-	// Flush anything remaining so shutdown doesn't silently drop the last
-	// interval of data.
+	// Flush anything remaining so shutdown doesn't silently drop pending data.
 	r.flushMetrics(ctx)
 	r.flushLogs(ctx)
 	return nil
@@ -217,10 +223,34 @@ func (r *canopenReceiver) dispatchLoop(ctx context.Context) {
 			continue
 		}
 
-		r.buildersMu.Lock()
-		r.sniff.HandleFrame(f, r.metricsIfEnabled(), r.logsIfEnabled())
-		r.buildersMu.Unlock()
+		if r.poller != nil {
+			r.poller.handleFrame(f)
+		}
+		transactionResponse := false
+		if r.rawPoller != nil {
+			transactionResponse = r.rawPoller.handleFrame(f)
+		}
+		if !transactionResponse {
+			r.buildersMu.Lock()
+			r.sniff.HandleFrame(f, r.metricsIfEnabled(), r.logsIfEnabled())
+			r.buildersMu.Unlock()
+		}
+		r.flushMetrics(ctx)
+		r.flushLogs(ctx)
 	}
+}
+
+func (r *canopenReceiver) sendFrame(ctx context.Context, f cantransport.Frame) error {
+	r.sendMu.Lock()
+	defer r.sendMu.Unlock()
+	return r.conn.Send(ctx, f)
+}
+
+func (r *canopenReceiver) sendPollFrame(ctx context.Context, f cantransport.Frame) error {
+	r.buildersMu.Lock()
+	r.sniff.HandleFrame(f, r.metricsIfEnabled(), r.logsIfEnabled())
+	r.buildersMu.Unlock()
+	return r.sendFrame(ctx, f)
 }
 
 func (r *canopenReceiver) metricsIfEnabled() *emit.MetricsBuilder {
@@ -235,36 +265,6 @@ func (r *canopenReceiver) logsIfEnabled() *emit.LogsBuilder {
 		return r.logsBuilder
 	}
 	return nil
-}
-
-func (r *canopenReceiver) metricsFlushLoop(ctx context.Context) {
-	defer r.wg.Done()
-	ticker := time.NewTicker(r.cfg.Metrics.FlushInterval)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			r.flushMetrics(ctx)
-		}
-	}
-}
-
-// logsFlushLoop is independent of metricsFlushLoop so logs keep flowing on
-// their own interval regardless of whether metrics are enabled.
-func (r *canopenReceiver) logsFlushLoop(ctx context.Context) {
-	defer r.wg.Done()
-	ticker := time.NewTicker(r.cfg.Logs.FlushInterval)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			r.flushLogs(ctx)
-		}
-	}
 }
 
 func (r *canopenReceiver) flushMetrics(ctx context.Context) {

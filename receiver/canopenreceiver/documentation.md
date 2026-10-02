@@ -40,7 +40,7 @@ event is attributable to a specific node.
   vendor-proprietary traffic sharing the bus (e.g. a service-tool protocol)
   so it can be decoded by a separate, downstream component.
 
-### User-configured metrics (`sdo.sniff.objects[]`, `pdo[].fields[]`, `raw.sniff.messages[].fields[]`)
+### User-configured metrics (`sdo.sniff.objects[]`, `sdo.poll.objects[]`, `pdo[].fields[]`, `raw.sniff.messages[].fields[]`)
 
 - **Type**: gauge or sum (per field's `metric_type`), named by the field's
   `name`.
@@ -115,6 +115,8 @@ event is attributable to a specific node.
   `canopen.sdo.subindex`/`canopen.sdo.direction`/`canopen.sdo.operation`
   (SDO object), or `canopen.raw.message` (raw message) - plus every field's
   static `attributes:`, merged in.
+  Active SDO poll responses use the same object fields and structured body
+  format as passively observed transfers.
 
 ### Raw frame capture
 
@@ -122,5 +124,16 @@ event is attributable to a specific node.
   in `raw.sniff.cob_ids`.
 - **Emitted**: once per matched frame, with no protocol interpretation.
 - **Severity**: Info
-- **Attributes**: `canopen.cob_id` (hex string), `canopen.raw.data`
+- **Attributes**: `canopen.cob_id` (hex string) and `canopen.raw.data`
   (uppercase hexadecimal payload).
+
+### Raw transactions
+
+Raw transactions use `raw.transactions[]` to send a configured request,
+wait for a matching response COB-ID, decode its configured fields, and emit
+metrics/logs. This is protocol-agnostic request/response support; vendor
+payloads and field names belong in deployment configuration.
+- **Attributes**: `canopen.cob_id` (hex string),
+  `canopen.raw.transaction` (configured transaction name), and each logged
+  field's static `attributes:`. Decoded field values are in the log body,
+  as a scalar for one field or a structured map for multiple fields.

@@ -1,15 +1,16 @@
 // Package canopenreceiver implements an OpenTelemetry Collector receiver for
 // CANopen traffic over Linux SocketCAN. This version supports passive
 // sniffing of standard SDO (including segmented transfers), PDO/EMCY/heartbeat
-// traffic, and declarative raw frames. Configuration controls which fields
-// are decoded and whether each is emitted as a metric, a log, or both.
-// Active SDO polling is added in a later commit.
+// traffic, active SDO uploads, and declarative raw frames. Configuration
+// controls which signals are decoded and whether each is emitted as a metric,
+// a log, or both.
 package canopenreceiver
 
 import (
 	"errors"
 	"fmt"
 	"math"
+	"reflect"
 	"time"
 
 	"go.opentelemetry.io/collector/component"
@@ -220,6 +221,78 @@ type SDOSniffConfig struct {
 	Objects  []SDOObjectConfig  `mapstructure:"objects"`
 }
 
+// SDOPollConfig configures active SDO upload requests for the declared objects.
+type SDOPollConfig struct {
+	Mode       string            `mapstructure:"mode"`
+	Interval   time.Duration     `mapstructure:"interval"`
+	Timeout    time.Duration     `mapstructure:"timeout"`
+	Retry      bool              `mapstructure:"retry"`
+	Backoff    time.Duration     `mapstructure:"backoff"`
+	MaxBackoff time.Duration     `mapstructure:"max_backoff"`
+	MaxRetries *int              `mapstructure:"max_retries"`
+	Objects    []SDOObjectConfig `mapstructure:"objects"`
+}
+
+func (p *SDOPollConfig) validate() error {
+	if p.Mode == "" {
+		p.Mode = "once"
+	}
+	if p.Mode != "once" && p.Mode != "interval" {
+		return errors.New("sdo.poll: mode must be one of once, interval")
+	}
+	if p.Mode == "interval" && p.Interval <= 0 {
+		return errors.New("sdo.poll: interval must be > 0 in interval mode")
+	}
+	if p.Timeout < 0 {
+		return errors.New("sdo.poll: timeout must be >= 0")
+	}
+	if p.Backoff < 0 || p.MaxBackoff < 0 {
+		return errors.New("sdo.poll: backoff values must be >= 0")
+	}
+	if p.MaxBackoff > 0 && p.Backoff > p.MaxBackoff {
+		return errors.New("sdo.poll: max_backoff must be >= backoff")
+	}
+	if p.MaxRetries != nil && *p.MaxRetries < 0 {
+		return errors.New("sdo.poll: max_retries must be >= 0")
+	}
+	if p.Mode == "once" && p.Retry && p.MaxRetries == nil {
+		return errors.New("sdo.poll: max_retries is required when retry is enabled in once mode")
+	}
+	seen := make(map[string]struct{}, len(p.Objects))
+	for i := range p.Objects {
+		if err := p.Objects[i].validate(fmt.Sprintf("sdo.poll.objects[%d]", i)); err != nil {
+			return err
+		}
+		key := fmt.Sprintf("%d:%04X:%02X", p.Objects[i].NodeID, p.Objects[i].Index, p.Objects[i].SubIndex)
+		if _, duplicate := seen[key]; duplicate {
+			return fmt.Errorf("sdo.poll.objects: duplicate object %s", key)
+		}
+		seen[key] = struct{}{}
+	}
+	return nil
+}
+
+// validatePDOs checks a list of PDOConfig for internal validity and
+// duplicate names/COB-IDs.
+func validatePDOs(pdos []PDOConfig) error {
+	seen := make(map[string]struct{}, len(pdos))
+	cobIDs := make(map[uint32]struct{}, len(pdos))
+	for i := range pdos {
+		if err := pdos[i].validate(); err != nil {
+			return err
+		}
+		if _, dup := seen[pdos[i].Name]; dup {
+			return fmt.Errorf("pdo: duplicate pdo name %q", pdos[i].Name)
+		}
+		seen[pdos[i].Name] = struct{}{}
+		if _, dup := cobIDs[pdos[i].CobID]; dup {
+			return fmt.Errorf("pdo: duplicate cob_id 0x%X", pdos[i].CobID)
+		}
+		cobIDs[pdos[i].CobID] = struct{}{}
+	}
+	return nil
+}
+
 // SDOChannelConfig identifies one standard CANopen SDO client/server COB-ID
 // pair. Multiple channels may use the same node ID.
 type SDOChannelConfig struct {
@@ -268,39 +341,7 @@ func (s *SDOSniffConfig) validate() error {
 	return nil
 }
 
-// SDOPollConfig declares standard CANopen SDO objects to actively poll.
-// Config/validation only: nothing in this receiver initiates an SDO
-// transfer yet (see this package's doc comment). Declaring entries here
-// has no runtime effect today.
-type SDOPollConfig struct {
-	Interval time.Duration     `mapstructure:"interval"`
-	Objects  []SDOObjectConfig `mapstructure:"objects"`
-}
-
-func (p *SDOPollConfig) validate() error {
-	if len(p.Objects) == 0 {
-		return nil
-	}
-	if p.Interval <= 0 {
-		return errors.New("sdo.poll: interval must be > 0 when objects are declared")
-	}
-	seen := make(map[string]struct{}, len(p.Objects))
-	for i := range p.Objects {
-		if err := p.Objects[i].validate("sdo.poll.objects"); err != nil {
-			return fmt.Errorf("sdo.poll.objects[%d]: %w", i, err)
-		}
-		key := fmt.Sprintf("%d:%04X:%02X", p.Objects[i].NodeID, p.Objects[i].Index, p.Objects[i].SubIndex)
-		if _, dup := seen[key]; dup {
-			return fmt.Errorf("sdo.poll.objects: duplicate object %s", key)
-		}
-		seen[key] = struct{}{}
-	}
-	return nil
-}
-
-// SDOConfig groups standard-CANopen-SDO config: passive Sniff (real,
-// working today) and active Poll (config/validation-only for now; see
-// SDOPollConfig).
+// SDOConfig groups passive SDO sniffing and active object polling.
 type SDOConfig struct {
 	Sniff SDOSniffConfig `mapstructure:"sniff"`
 	Poll  SDOPollConfig  `mapstructure:"poll"`
@@ -310,7 +351,38 @@ func (s *SDOConfig) validate() error {
 	if err := s.Sniff.validate(); err != nil {
 		return err
 	}
-	return s.Poll.validate()
+	if err := s.Poll.validate(); err != nil {
+		return err
+	}
+	if len(s.Poll.Objects) > 0 {
+		polledNodes := make(map[uint8]struct{}, len(s.Poll.Objects))
+		for _, object := range s.Poll.Objects {
+			polledNodes[object.NodeID] = struct{}{}
+		}
+		channelCounts := make(map[uint8]int, len(s.Sniff.Channels))
+		for _, channel := range s.Sniff.Channels {
+			channelCounts[channel.NodeID]++
+		}
+		for nodeID := range polledNodes {
+			if channelCounts[nodeID] > 1 {
+				return fmt.Errorf("sdo.sniff.channels: node_id %d has multiple channels and cannot be polled unambiguously", nodeID)
+			}
+		}
+	}
+	passiveObjects := make(map[string]SDOObjectConfig, len(s.Sniff.Objects))
+	for _, object := range s.Sniff.Objects {
+		passiveObjects[sdoObjectKey(object)] = object
+	}
+	for i, object := range s.Poll.Objects {
+		if passive, exists := passiveObjects[sdoObjectKey(object)]; exists && !reflect.DeepEqual(passive.Fields, object.Fields) {
+			return fmt.Errorf("sdo.poll.objects[%d]: configuration conflicts with passive object %s", i, sdoObjectKey(object))
+		}
+	}
+	return nil
+}
+
+func sdoObjectKey(object SDOObjectConfig) string {
+	return fmt.Sprintf("%d:%04X:%02X", object.NodeID, object.Index, object.SubIndex)
 }
 
 // RawMatchByte is a byte-equality condition used to discriminate between
@@ -345,6 +417,16 @@ type RawMessageConfig struct {
 	Fields []FieldConfig  `mapstructure:"fields"`
 }
 
+func (t RawTransactionConfig) effectiveMode() string {
+	if t.Mode != "" {
+		return t.Mode
+	}
+	if t.Interval > 0 {
+		return "interval"
+	}
+	return "once"
+}
+
 func (r *RawMessageConfig) validate() error {
 	if r.Name == "" {
 		return errors.New("raw.sniff.messages: name must not be empty")
@@ -373,8 +455,9 @@ func (r *RawMessageConfig) validate() error {
 	return nil
 }
 
-// RawFrameConfig configures passive capture of arbitrary CAN frames that are
-// not decoded by any other sniffing feature. By default (no Messages
+// RawFrameConfig configures passive capture and generic request/response
+// transactions for arbitrary CAN frames that are not decoded by another
+// sniffing feature. By default (no Messages
 // declared for a CobID) it performs no protocol interpretation and matching
 // frames are emitted as their raw hex payload; when a Messages entry
 // declares field layout for a CobID, matching frames are decoded into named
@@ -421,17 +504,25 @@ func (r *RawFrameConfig) validate() error {
 	return nil
 }
 
-// RawResponseConfig declares how a RawTransactionConfig's correlated reply
-// would be decoded, once the receiver supports correlating it. Config/
-// validation only for now - see RawTransactionConfig.
+// RawResponseConfig declares how a correlated raw transaction response is
+// matched and decoded.
 type RawResponseConfig struct {
-	CobID  uint32        `mapstructure:"cob_id"`
-	Fields []FieldConfig `mapstructure:"fields"`
+	CobID  uint32         `mapstructure:"cob_id"`
+	Match  []RawMatchByte `mapstructure:"match"`
+	Fields []FieldConfig  `mapstructure:"fields"`
 }
 
 func (r *RawResponseConfig) validate(scope string) error {
 	if r.CobID == 0 || r.CobID > 0x7FF {
 		return fmt.Errorf("%s.response: cob_id 0x%X out of range for an 11-bit standard COB-ID", scope, r.CobID)
+	}
+	if len(r.Match) == 0 {
+		return fmt.Errorf("%s.response: match must identify the expected reply", scope)
+	}
+	for i := range r.Match {
+		if err := r.Match[i].validate(fmt.Sprintf("%s.response match[%d]", scope, i)); err != nil {
+			return err
+		}
 	}
 	if len(r.Fields) == 0 {
 		return fmt.Errorf("%s.response: must declare at least one field", scope)
@@ -449,24 +540,19 @@ func (r *RawResponseConfig) validate(scope string) error {
 	return nil
 }
 
-// RawTransactionConfig declares a raw CAN request/response poll cycle: send
-// the request, wait for the correlated reply (or Timeout), then wait Interval before polling again -
-// not a fixed-rate blind retransmit. Config/validation only for now:
-// nothing in this receiver transmits a request or correlates a reply to it
-// yet - a planned future addition, same status as SDOPollConfig. Declaring
-// one here is inert today.
+// RawTransactionConfig declares a generic CAN request/response transaction.
 type RawTransactionConfig struct {
-	Name  string `mapstructure:"name"`
-	CobID uint32 `mapstructure:"cob_id"`
-	// Payload is the fixed request frame's payload bytes (1-8).
-	Payload []uint8 `mapstructure:"payload"`
-	// Timeout bounds how long to wait for the correlated response before
-	// giving up on that poll cycle.
-	Timeout time.Duration `mapstructure:"timeout"`
-	// Interval is how long to wait after a response (or Timeout) before
-	// sending the next request.
-	Interval time.Duration     `mapstructure:"interval"`
-	Response RawResponseConfig `mapstructure:"response"`
+	Name       string            `mapstructure:"name"`
+	CobID      uint32            `mapstructure:"cob_id"`
+	Payload    []uint8           `mapstructure:"payload"`
+	Timeout    time.Duration     `mapstructure:"timeout"`
+	Mode       string            `mapstructure:"mode"`
+	Interval   time.Duration     `mapstructure:"interval"`
+	Retry      bool              `mapstructure:"retry"`
+	Backoff    time.Duration     `mapstructure:"backoff"`
+	MaxBackoff time.Duration     `mapstructure:"max_backoff"`
+	MaxRetries *int              `mapstructure:"max_retries"`
+	Response   RawResponseConfig `mapstructure:"response"`
 }
 
 func (r *RawTransactionConfig) validate() error {
@@ -474,7 +560,7 @@ func (r *RawTransactionConfig) validate() error {
 		return errors.New("raw.transactions: name must not be empty")
 	}
 	if r.CobID == 0 || r.CobID > 0x7FF {
-		return fmt.Errorf("raw transaction %q: cob_id 0x%X out of range for an 11-bit standard COB-ID", r.Name, r.CobID)
+		return fmt.Errorf("raw transaction %q: cob_id 0x%X out of range", r.Name, r.CobID)
 	}
 	if len(r.Payload) == 0 || len(r.Payload) > 8 {
 		return fmt.Errorf("raw transaction %q: payload must be 1..8 bytes", r.Name)
@@ -482,18 +568,37 @@ func (r *RawTransactionConfig) validate() error {
 	if r.Timeout <= 0 {
 		return fmt.Errorf("raw transaction %q: timeout must be > 0", r.Name)
 	}
-	if r.Interval <= 0 {
-		return fmt.Errorf("raw transaction %q: interval must be > 0", r.Name)
+	if r.Interval < 0 {
+		return fmt.Errorf("raw transaction %q: interval must be >= 0", r.Name)
 	}
-	if err := r.Response.validate(fmt.Sprintf("raw transaction %q", r.Name)); err != nil {
-		return err
+	switch r.effectiveMode() {
+	case "once":
+		if r.Interval != 0 {
+			return fmt.Errorf("raw transaction %q: interval is only valid in interval mode", r.Name)
+		}
+	case "interval":
+		if r.Interval <= 0 {
+			return fmt.Errorf("raw transaction %q: interval must be > 0 in interval mode", r.Name)
+		}
+	default:
+		return fmt.Errorf("raw transaction %q: mode must be once or interval", r.Name)
 	}
-	return nil
+	if r.Backoff < 0 || r.MaxBackoff < 0 {
+		return fmt.Errorf("raw transaction %q: backoff values must be >= 0", r.Name)
+	}
+	if r.MaxBackoff > 0 && r.Backoff > r.MaxBackoff {
+		return fmt.Errorf("raw transaction %q: max_backoff must be >= backoff", r.Name)
+	}
+	if r.MaxRetries != nil && *r.MaxRetries < 0 {
+		return fmt.Errorf("raw transaction %q: max_retries must be >= 0", r.Name)
+	}
+	if r.effectiveMode() == "once" && r.Retry && r.MaxRetries == nil {
+		return fmt.Errorf("raw transaction %q: max_retries is required when retry is enabled in once mode", r.Name)
+	}
+	return r.Response.validate(fmt.Sprintf("raw transaction %q", r.Name))
 }
 
-// RawConfig groups non-CANopen (vendor/proprietary) CAN traffic config:
-// passive Sniff (real, working today) and Transactions (config/validation-
-// only for now; see RawTransactionConfig).
+// RawConfig groups non-CANopen (vendor/proprietary) CAN traffic config.
 type RawConfig struct {
 	Sniff        RawFrameConfig         `mapstructure:"sniff"`
 	Transactions []RawTransactionConfig `mapstructure:"transactions"`
@@ -520,61 +625,36 @@ func (r *RawConfig) validate() error {
 			return fmt.Errorf("raw.transactions: duplicate request cob_id 0x%X payload %X", r.Transactions[i].CobID, r.Transactions[i].Payload)
 		}
 		seenRequests[requestKey] = struct{}{}
+		for previousIndex := 0; previousIndex < i; previousIndex++ {
+			previous := r.Transactions[previousIndex]
+			current := r.Transactions[i]
+			if previous.Response.CobID == current.Response.CobID && rawMatchesCanOverlap(previous.Response.Match, current.Response.Match) {
+				return fmt.Errorf("raw.transactions[%d]: response.match overlaps transaction %q on cob_id 0x%03X", i, previous.Name, current.Response.CobID)
+			}
+		}
 	}
 	return nil
 }
 
-// validatePDOs checks a list of PDOConfig for internal validity and
-// duplicate names/COB-IDs.
-func validatePDOs(pdos []PDOConfig) error {
-	seen := make(map[string]struct{}, len(pdos))
-	cobIDs := make(map[uint32]struct{}, len(pdos))
-	for i := range pdos {
-		if err := pdos[i].validate(); err != nil {
-			return err
+func rawMatchesCanOverlap(left, right []RawMatchByte) bool {
+	for _, leftMatch := range left {
+		for _, rightMatch := range right {
+			if leftMatch.ByteOffset == rightMatch.ByteOffset && leftMatch.Value != rightMatch.Value {
+				return false
+			}
 		}
-		if _, dup := seen[pdos[i].Name]; dup {
-			return fmt.Errorf("pdo: duplicate pdo name %q", pdos[i].Name)
-		}
-		seen[pdos[i].Name] = struct{}{}
-		if _, dup := cobIDs[pdos[i].CobID]; dup {
-			return fmt.Errorf("pdo: duplicate cob_id 0x%X", pdos[i].CobID)
-		}
-		cobIDs[pdos[i].CobID] = struct{}{}
 	}
-	return nil
+	return true
 }
 
 // MetricsConfig configures the metrics signal of this receiver.
 type MetricsConfig struct {
-	Enabled       bool          `mapstructure:"enabled"`
-	FlushInterval time.Duration `mapstructure:"flush_interval"`
-}
-
-func (m *MetricsConfig) validate() error {
-	if !m.Enabled {
-		return nil
-	}
-	if m.FlushInterval <= 0 {
-		return errors.New("metrics: flush_interval must be > 0 when metrics is enabled")
-	}
-	return nil
+	Enabled bool `mapstructure:"enabled"`
 }
 
 // LogsConfig configures the logs signal of this receiver.
 type LogsConfig struct {
-	Enabled       bool          `mapstructure:"enabled"`
-	FlushInterval time.Duration `mapstructure:"flush_interval"`
-}
-
-func (l *LogsConfig) validate() error {
-	if !l.Enabled {
-		return nil
-	}
-	if l.FlushInterval <= 0 {
-		return errors.New("logs: flush_interval must be > 0 when logs is enabled")
-	}
-	return nil
+	Enabled bool `mapstructure:"enabled"`
 }
 
 // Config is the configuration for the CANopen receiver. sdo, pdo, and raw
@@ -615,12 +695,6 @@ func (cfg *Config) Validate() error {
 	if !cfg.Metrics.Enabled && !cfg.Logs.Enabled {
 		return errors.New("at least one of metrics or logs must be enabled")
 	}
-	if err := cfg.Metrics.validate(); err != nil {
-		return err
-	}
-	if err := cfg.Logs.validate(); err != nil {
-		return err
-	}
 	if err := cfg.Heartbeat.validate("heartbeat"); err != nil {
 		return err
 	}
@@ -637,12 +711,8 @@ func (cfg *Config) Validate() error {
 		return err
 	}
 
-	// Cross-check: any signal requesting metrics emission requires
-	// metrics.enabled, and any signal requesting logs emission requires
-	// logs.enabled, so misconfiguration fails fast instead of silently
-	// dropping data. This also covers the still-unimplemented sdo.poll/
-	// raw.transactions sections, so their config is already correct the
-	// moment the receiver starts acting on it.
+	// Cross-check output settings so misconfiguration fails fast instead of
+	// silently dropping data.
 	var checkOutputs func(scope string, metrics, logs bool) error
 	checkOutputs = func(scope string, metrics, logs bool) error {
 		if metrics && !cfg.Metrics.Enabled {
@@ -704,12 +774,10 @@ func createDefaultConfig() component.Config {
 	return &Config{
 		ReadTimeout: 2 * time.Second,
 		Metrics: MetricsConfig{
-			Enabled:       true,
-			FlushInterval: 10 * time.Second,
+			Enabled: true,
 		},
 		Logs: LogsConfig{
-			Enabled:       true,
-			FlushInterval: 10 * time.Second,
+			Enabled: true,
 		},
 	}
 }

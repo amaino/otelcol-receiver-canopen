@@ -156,6 +156,7 @@ type Sniffer struct {
 	nmtState   map[uint8]NMTState
 	sdo        *sdoobserver.Observer
 	sdoByCobID map[uint32]sdoChannel
+	sdoIndex   map[sdoKey]SDOObjectDef
 }
 
 type sdoChannel struct {
@@ -164,9 +165,27 @@ type sdoChannel struct {
 	clientCobID uint32
 }
 
+type sdoKey struct {
+	nodeID   uint8
+	index    uint16
+	subIndex uint8
+}
+
 // New creates a Sniffer for the given configuration.
 func New(cfg Config) *Sniffer {
-	s := &Sniffer{cfg: cfg, nmtState: make(map[uint8]NMTState), sdo: sdoobserver.New(), sdoByCobID: make(map[uint32]sdoChannel)}
+	s := &Sniffer{
+		cfg:        cfg,
+		nmtState:   make(map[uint8]NMTState),
+		sdo:        sdoobserver.New(),
+		sdoByCobID: make(map[uint32]sdoChannel),
+		sdoIndex:   make(map[sdoKey]SDOObjectDef, len(cfg.SDOObjects)),
+	}
+	for _, object := range cfg.SDOObjects {
+		key := sdoKey{nodeID: object.NodeID, index: object.Index, subIndex: object.SubIndex}
+		if _, exists := s.sdoIndex[key]; !exists {
+			s.sdoIndex[key] = object
+		}
+	}
 	if len(cfg.SDOChannels) == 0 {
 		return s
 	}
@@ -478,22 +497,21 @@ func (s *Sniffer) emitTypedSDO(event sdoobserver.Event, metrics *emit.MetricsBui
 	if event.AbortCode != nil {
 		return
 	}
-	for _, object := range s.cfg.SDOObjects {
-		if object.NodeID != event.NodeID || object.Index != event.Index || object.SubIndex != event.SubIndex {
-			continue
-		}
-		attrs := s.resourceAttrs()
-		attrs["canopen.node_id"] = fmt.Sprintf("%d", event.NodeID)
-		attrs["canopen.sdo.index"] = fmt.Sprintf("0x%04X", event.Index)
-		attrs["canopen.sdo.subindex"] = fmt.Sprintf("0x%02X", event.SubIndex)
-		contextAttrs := map[string]any{
-			"canopen.node_id":       int(event.NodeID),
-			"canopen.sdo.index":     int(event.Index),
-			"canopen.sdo.subindex":  int(event.SubIndex),
-			"canopen.sdo.direction": string(event.Direction),
-			"canopen.sdo.operation": event.Operation,
-		}
-		body := fmt.Sprintf("canopen SDO object 0x%04X:%02X decoded", event.Index, event.SubIndex)
-		s.emitFields(object.Fields, event.Data, attrs, contextAttrs, body, metrics, logs)
+	object, ok := s.sdoIndex[sdoKey{nodeID: event.NodeID, index: event.Index, subIndex: event.SubIndex}]
+	if !ok {
+		return
 	}
+	attrs := s.resourceAttrs()
+	attrs["canopen.node_id"] = fmt.Sprintf("%d", event.NodeID)
+	attrs["canopen.sdo.index"] = fmt.Sprintf("0x%04X", event.Index)
+	attrs["canopen.sdo.subindex"] = fmt.Sprintf("0x%02X", event.SubIndex)
+	contextAttrs := map[string]any{
+		"canopen.node_id":       int(event.NodeID),
+		"canopen.sdo.index":     int(event.Index),
+		"canopen.sdo.subindex":  int(event.SubIndex),
+		"canopen.sdo.direction": string(event.Direction),
+		"canopen.sdo.operation": event.Operation,
+	}
+	body := fmt.Sprintf("canopen SDO object 0x%04X:%02X decoded", event.Index, event.SubIndex)
+	s.emitFields(object.Fields, event.Data, attrs, contextAttrs, body, metrics, logs)
 }
