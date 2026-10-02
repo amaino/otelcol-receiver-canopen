@@ -16,6 +16,9 @@ nodes. It also supports active SDO uploads configured under
 `sdo.poll`.
 All behavior is driven by declarative configuration.
 
+Decoded metrics and logs are passed to the Collector pipeline as frames are
+processed. Use the Collector `batch` processor to aggregate data across frames.
+
 Every field you configure from a PDO, a raw message, an SDO object, or a raw
 transaction's response can be emitted as a metric, a log, or both. Declaring
 several fields against one payload decodes a struct (e.g. a multi-field
@@ -36,7 +39,6 @@ receivers:
     read_timeout: 1s
     metrics:
       enabled: true
-      flush_interval: 10s
     logs:
       enabled: true
     heartbeat:
@@ -106,7 +108,6 @@ receivers:
 | `interface` | string | *(required)* | SocketCAN interface name (e.g. `can0`, `vcan0`). |
 | `read_timeout` | duration | `1s` | Bounds a single frame receive; also governs shutdown responsiveness. |
 | `metrics.enabled` | bool | `true` | Enables the metrics signal. |
-| `metrics.flush_interval` | duration | `10s` | How often accumulated metric data points are flushed to the pipeline. |
 | `logs.enabled` | bool | `true` | Enables the logs signal. |
 | `heartbeat.*` / `emcy.*` / `sdo.*` / `pdo[]` / `raw.*` | | | See below. |
 

@@ -2,7 +2,6 @@ interface: can0
 read_timeout: 1s
 metrics:
   enabled: true
-  flush_interval: 10s
 logs:
   enabled: true
 heartbeat:

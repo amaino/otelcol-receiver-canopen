@@ -649,31 +649,12 @@ func rawMatchesCanOverlap(left, right []RawMatchByte) bool {
 
 // MetricsConfig configures the metrics signal of this receiver.
 type MetricsConfig struct {
-	Enabled       bool          `mapstructure:"enabled"`
-	FlushInterval time.Duration `mapstructure:"flush_interval"`
-}
-
-func (m *MetricsConfig) validate() error {
-	if m.FlushInterval <= 0 {
-		return errors.New("metrics: flush_interval must be > 0 when metrics or logs are enabled")
-	}
-	return nil
+	Enabled bool `mapstructure:"enabled"`
 }
 
 // LogsConfig configures the logs signal of this receiver.
 type LogsConfig struct {
-	Enabled       bool          `mapstructure:"enabled"`
-	FlushInterval time.Duration `mapstructure:"flush_interval"`
-}
-
-func (l *LogsConfig) validate() error {
-	if !l.Enabled {
-		return nil
-	}
-	if l.FlushInterval <= 0 {
-		return errors.New("logs: flush_interval must be > 0 when logs is enabled")
-	}
-	return nil
+	Enabled bool `mapstructure:"enabled"`
 }
 
 // Config is the configuration for the CANopen receiver. sdo, pdo, and raw
@@ -713,12 +694,6 @@ func (cfg *Config) Validate() error {
 	}
 	if !cfg.Metrics.Enabled && !cfg.Logs.Enabled {
 		return errors.New("at least one of metrics or logs must be enabled")
-	}
-	if err := cfg.Metrics.validate(); err != nil {
-		return err
-	}
-	if err := cfg.Logs.validate(); err != nil {
-		return err
 	}
 	if err := cfg.Heartbeat.validate("heartbeat"); err != nil {
 		return err
@@ -799,12 +774,10 @@ func createDefaultConfig() component.Config {
 	return &Config{
 		ReadTimeout: 2 * time.Second,
 		Metrics: MetricsConfig{
-			Enabled:       true,
-			FlushInterval: 10 * time.Second,
+			Enabled: true,
 		},
 		Logs: LogsConfig{
-			Enabled:       true,
-			FlushInterval: 10 * time.Second,
+			Enabled: true,
 		},
 	}
 }

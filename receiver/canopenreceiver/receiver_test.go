@@ -34,8 +34,6 @@ func TestReceiver_EndToEnd_SniffPDOAndEMCY(t *testing.T) {
 	cfg := createDefaultConfig().(*Config)
 	cfg.Interface = "vcan0"
 	cfg.ReadTimeout = 50 * time.Millisecond
-	cfg.Metrics.FlushInterval = 100 * time.Millisecond
-	cfg.Logs.FlushInterval = 100 * time.Millisecond
 	cfg.EMCY.Logs = true
 	cfg.PDO = []PDOConfig{
 		{
@@ -78,11 +76,8 @@ func TestReceiver_EndToEnd_SniffPDOAndEMCY(t *testing.T) {
 	assert.Contains(t, lr.Body().Str(), "emergency")
 }
 
-// Regression test: metrics and logs each flush on their own schedule,
-// independent of whether the other signal is enabled. Previously the only
-// flush loop started by doStart was gated on cfg.Metrics.Enabled, so
-// disabling metrics silently stopped logs from ever being flushed too.
-func TestReceiver_MetricsAndLogsFlushIndependently(t *testing.T) {
+// Enabled signals are consumed independently for each decoded frame.
+func TestReceiver_ConsumesEnabledSignals(t *testing.T) {
 	tests := []struct {
 		name           string
 		metricsEnabled bool
@@ -101,9 +96,7 @@ func TestReceiver_MetricsAndLogsFlushIndependently(t *testing.T) {
 			cfg.Interface = "vcan0"
 			cfg.ReadTimeout = 50 * time.Millisecond
 			cfg.Metrics.Enabled = tt.metricsEnabled
-			cfg.Metrics.FlushInterval = 100 * time.Millisecond
 			cfg.Logs.Enabled = tt.logsEnabled
-			cfg.Logs.FlushInterval = 100 * time.Millisecond
 			cfg.PDO = []PDOConfig{
 				{
 					Name:  "motor_tpdo1",
@@ -130,10 +123,7 @@ func TestReceiver_MetricsAndLogsFlushIndependently(t *testing.T) {
 			// Inject a PDO frame: int16 le 1234 -> bytes D2 04
 			bus.Inject(cantransport.Frame{ID: 0x181, Data: []byte{0xD2, 0x04}})
 
-			// Wait on whichever signal(s) are enabled; a disabled signal has
-			// no flush loop at all, so by the time the enabled one(s) flush,
-			// a disabled signal coupled to the same ticker (the bug) would
-			// already have emitted too.
+			// Wait only for enabled signals; disabled outputs must stay empty.
 			if tt.metricsEnabled {
 				require.Eventually(t, func() bool {
 					return len(metricsSink.AllMetrics()) > 0
@@ -167,10 +157,8 @@ func TestReceiver_SDOUploadPollOnce(t *testing.T) {
 	cfg := createDefaultConfig().(*Config)
 	cfg.Interface = "vcan0"
 	cfg.ReadTimeout = 20 * time.Millisecond
-	cfg.Metrics.FlushInterval = 20 * time.Millisecond
 	cfg.Metrics.Enabled = false
 	cfg.Logs.Enabled = true
-	cfg.Logs.FlushInterval = 20 * time.Millisecond
 	cfg.SDO.Sniff.Channels = []SDOChannelConfig{{
 		NodeID: 1, ClientToServerCobID: 0x601, ServerToClientCobID: 0x581,
 	}}
@@ -213,9 +201,7 @@ func TestReceiver_SDOUploadPollSegmented(t *testing.T) {
 	cfg := createDefaultConfig().(*Config)
 	cfg.Interface = "vcan0"
 	cfg.ReadTimeout = 20 * time.Millisecond
-	cfg.Metrics.FlushInterval = 20 * time.Millisecond
 	cfg.Metrics.Enabled = false
-	cfg.Logs.FlushInterval = 20 * time.Millisecond
 	cfg.SDO.Poll = SDOPollConfig{
 		Mode:    "once",
 		Timeout: time.Second,
@@ -270,7 +256,6 @@ func TestReceiver_SDOUploadPollRetriesAfterAbort(t *testing.T) {
 	cfg := createDefaultConfig().(*Config)
 	cfg.Interface = "vcan0"
 	cfg.ReadTimeout = 20 * time.Millisecond
-	cfg.Metrics.FlushInterval = 20 * time.Millisecond
 	cfg.Metrics.Enabled = false
 	cfg.SDO.Poll = SDOPollConfig{
 		Mode:       "once",
@@ -348,7 +333,6 @@ func TestReceiver_SDOUploadPollTimeoutDoesNotEmitValue(t *testing.T) {
 	cfg := createDefaultConfig().(*Config)
 	cfg.Interface = "vcan0"
 	cfg.ReadTimeout = 20 * time.Millisecond
-	cfg.Metrics.FlushInterval = 20 * time.Millisecond
 	cfg.Metrics.Enabled = false
 	cfg.Logs.Enabled = true
 	cfg.SDO.Poll = SDOPollConfig{
@@ -451,9 +435,7 @@ func TestReceiver_RawTransactionPoll(t *testing.T) {
 	cfg := createDefaultConfig().(*Config)
 	cfg.Interface = "vcan0"
 	cfg.ReadTimeout = 20 * time.Millisecond
-	cfg.Metrics.FlushInterval = 20 * time.Millisecond
 	cfg.Metrics.Enabled = false
-	cfg.Logs.FlushInterval = 20 * time.Millisecond
 	cfg.Raw.Transactions = []RawTransactionConfig{{
 		Name:     "device.firmware",
 		CobID:    0x51E,
@@ -562,7 +544,6 @@ func TestReceiver_RawTransactionPollRetriesAfterTimeout(t *testing.T) {
 	cfg := createDefaultConfig().(*Config)
 	cfg.Interface = "vcan0"
 	cfg.ReadTimeout = 10 * time.Millisecond
-	cfg.Metrics.FlushInterval = 10 * time.Millisecond
 	cfg.Metrics.Enabled = false
 	cfg.Raw.Transactions = []RawTransactionConfig{{
 		Name:       "device.firmware",

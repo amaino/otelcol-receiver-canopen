@@ -22,9 +22,7 @@ func TestLoadConfig(t *testing.T) {
 	assert.Equal(t, "can0", cfg.Interface)
 	assert.Equal(t, time.Second, cfg.ReadTimeout)
 	assert.True(t, cfg.Metrics.Enabled)
-	assert.Equal(t, 10*time.Second, cfg.Metrics.FlushInterval)
 	assert.True(t, cfg.Logs.Enabled)
-	assert.Equal(t, 10*time.Second, cfg.Logs.FlushInterval)
 
 	assert.True(t, cfg.Heartbeat.Logs)
 	assert.True(t, cfg.EMCY.Metrics)
@@ -87,13 +85,12 @@ func TestConfig_Validate_NoSignalEnabled(t *testing.T) {
 	require.Error(t, cfg.Validate())
 }
 
-func TestConfig_Validate_LogsOnlyRequiresPositiveFlushInterval(t *testing.T) {
+func TestConfig_Validate_LogsOnlyDoesNotRequireMetrics(t *testing.T) {
 	cfg := validBaseConfig()
 	cfg.PDO = nil
 	cfg.Metrics.Enabled = false
-	cfg.Metrics.FlushInterval = 0
 	cfg.Logs.Enabled = true
-	require.ErrorContains(t, cfg.Validate(), "flush_interval must be > 0")
+	require.NoError(t, cfg.Validate())
 }
 
 func TestConfig_Validate_BadCobID(t *testing.T) {

@@ -17,7 +17,8 @@ func TestNewFactory(t *testing.T) {
 	assert.Equal(t, metadata.Type, f.Type())
 
 	cfg := f.CreateDefaultConfig().(*Config)
-	assert.Equal(t, MetricsConfig{Enabled: true, FlushInterval: cfg.Metrics.FlushInterval}, cfg.Metrics)
+	assert.Equal(t, MetricsConfig{Enabled: true}, cfg.Metrics)
+	assert.Equal(t, LogsConfig{Enabled: true}, cfg.Logs)
 }
 
 func TestFactory_CreateMetricsAndLogsReceiver_ShareInstance(t *testing.T) {

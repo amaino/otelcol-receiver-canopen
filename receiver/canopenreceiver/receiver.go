@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"sync"
-	"time"
 
 	"go.opentelemetry.io/collector/component"
 	"go.opentelemetry.io/collector/consumer"
@@ -162,15 +161,6 @@ func (r *canopenReceiver) doStart(ctx context.Context) error {
 		go r.rawPoller.run()
 	}
 
-	if r.cfg.Metrics.Enabled || r.cfg.Logs.Enabled {
-		r.wg.Add(1)
-		go r.metricsFlushLoop(runCtx)
-	}
-	if r.cfg.Logs.Enabled {
-		r.wg.Add(1)
-		go r.logsFlushLoop(runCtx)
-	}
-
 	return nil
 }
 
@@ -199,8 +189,7 @@ func (r *canopenReceiver) doShutdown(ctx context.Context) error {
 	case <-ctx.Done():
 		return ctx.Err()
 	}
-	// Flush anything remaining so shutdown doesn't silently drop the last
-	// interval of data.
+	// Flush anything remaining so shutdown doesn't silently drop pending data.
 	r.flushMetrics(ctx)
 	r.flushLogs(ctx)
 	return nil
@@ -246,6 +235,8 @@ func (r *canopenReceiver) dispatchLoop(ctx context.Context) {
 			r.sniff.HandleFrame(f, r.metricsIfEnabled(), r.logsIfEnabled())
 			r.buildersMu.Unlock()
 		}
+		r.flushMetrics(ctx)
+		r.flushLogs(ctx)
 	}
 }
 
@@ -274,36 +265,6 @@ func (r *canopenReceiver) logsIfEnabled() *emit.LogsBuilder {
 		return r.logsBuilder
 	}
 	return nil
-}
-
-func (r *canopenReceiver) metricsFlushLoop(ctx context.Context) {
-	defer r.wg.Done()
-	ticker := time.NewTicker(r.cfg.Metrics.FlushInterval)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			r.flushMetrics(ctx)
-		}
-	}
-}
-
-// logsFlushLoop is independent of metricsFlushLoop so logs keep flowing on
-// their own interval regardless of whether metrics are enabled.
-func (r *canopenReceiver) logsFlushLoop(ctx context.Context) {
-	defer r.wg.Done()
-	ticker := time.NewTicker(r.cfg.Logs.FlushInterval)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			r.flushLogs(ctx)
-		}
-	}
 }
 
 func (r *canopenReceiver) flushMetrics(ctx context.Context) {
