@@ -91,14 +91,14 @@ func TestObserver_UploadIgnoresWrongObjectAndRecovers(t *testing.T) {
 
 func TestObserver_TruncatedUploadResponsePreservesPendingRequest(t *testing.T) {
 	for _, command := range []byte{0x43, 0x41} {
-		for length := 1; length < 4; length++ {
+		for length := 1; length < sdoFrameLength; length++ {
 			t.Run(fmt.Sprintf("%02X/length%d", command, length), func(t *testing.T) {
 				o := New()
 				_, err := o.Observe(1, ClientToServer, []byte{0x40, 0, 0x20, 0, 0, 0, 0, 0})
 				require.NoError(t, err)
-				frame := []byte{command, 0, 0x20, 0}
+				frame := []byte{command, 0, 0x20, 0, 0, 0, 0, 0}
 				event, err := o.Observe(1, ServerToClient, frame[:length])
-				require.ErrorContains(t, err, "truncated SDO upload response")
+				require.ErrorContains(t, err, "truncated SDO frame")
 				assert.Nil(t, event)
 
 				event, err = o.Observe(1, ServerToClient, []byte{0x43, 0, 0x20, 0, 4, 0, 0, 0})

@@ -10,6 +10,7 @@ type Direction string
 const (
 	ClientToServer Direction = "client_to_server"
 	ServerToClient Direction = "server_to_client"
+	sdoFrameLength           = 8
 )
 
 // Event is a completed expedited or segmented SDO transfer, or an SDO abort.
@@ -58,11 +59,11 @@ func (o *Observer) ObserveOnChannel(channelKey uint32, nodeID uint8, direction D
 	if len(frame) == 0 {
 		return nil, nil
 	}
+	if len(frame) < sdoFrameLength {
+		return nil, fmt.Errorf("truncated SDO frame for node %d: got %d bytes, need %d", nodeID, len(frame), sdoFrameLength)
+	}
 	command := frame[0]
 	if direction == ServerToClient && command == 0x80 {
-		if len(frame) < 8 {
-			return nil, fmt.Errorf("truncated SDO abort for node %d", nodeID)
-		}
 		index, subIndex := objectAddress(frame)
 		abortCode := uint32(frame[4]) | uint32(frame[5])<<8 | uint32(frame[6])<<16 | uint32(frame[7])<<24
 		delete(o.transfers, channelKey)
@@ -84,23 +85,14 @@ func (o *Observer) ObserveOnChannel(channelKey uint32, nodeID uint8, direction D
 
 func (o *Observer) observeClient(channelKey uint32, nodeID uint8, command byte, frame []byte) (*Event, error) {
 	if command == 0x40 {
-		if len(frame) < 4 {
-			return nil, fmt.Errorf("truncated SDO upload request for node %d", nodeID)
-		}
 		index, subIndex := objectAddress(frame)
 		o.transfers[channelKey] = &transfer{nodeID: nodeID, direction: ServerToClient, operation: "upload", index: index, subIndex: subIndex}
 		return nil, nil
 	}
 	if command&0xE0 == 0x20 {
-		if len(frame) < 4 {
-			return nil, fmt.Errorf("truncated SDO download request for node %d", nodeID)
-		}
 		index, subIndex := objectAddress(frame)
 		if command&0x02 != 0 {
-			data, err := expeditedData(command, frame)
-			if err != nil {
-				return nil, err
-			}
+			data := expeditedData(command, frame)
 			return &Event{NodeID: nodeID, Direction: ClientToServer, Operation: "download", Index: index, SubIndex: subIndex, Data: data}, nil
 		}
 		o.transfers[channelKey] = &transfer{nodeID: nodeID, direction: ClientToServer, operation: "download", index: index, subIndex: subIndex}
@@ -118,18 +110,12 @@ func (o *Observer) observeServer(channelKey uint32, nodeID uint8, command byte, 
 		return nil, nil
 	}
 	if transfer.operation == "upload" && command&0xE0 == 0x40 {
-		if len(frame) < 4 {
-			return nil, fmt.Errorf("truncated SDO upload response for node %d", nodeID)
-		}
 		index, subIndex := objectAddress(frame)
 		if index != transfer.index || subIndex != transfer.subIndex {
 			return nil, nil
 		}
 		if command&0x02 != 0 {
-			data, err := expeditedData(command, frame)
-			if err != nil {
-				return nil, err
-			}
+			data := expeditedData(command, frame)
 			delete(o.transfers, channelKey)
 			return complete(transfer, data), nil
 		}
@@ -153,9 +139,6 @@ func (o *Observer) observeSegment(channelKey uint32, nodeID uint8, direction Dir
 	if transfer.operation == "upload" && !transfer.uploadInitiated {
 		return nil, nil
 	}
-	if len(frame) < 1 {
-		return nil, fmt.Errorf("truncated SDO segment for node %d", nodeID)
-	}
 	toggle := command&0x10 != 0
 	if toggle != transfer.toggle {
 		delete(o.transfers, channelKey)
@@ -165,10 +148,6 @@ func (o *Observer) observeSegment(channelKey uint32, nodeID uint8, direction Dir
 	last := command&0x01 != 0
 	if !last {
 		unused = 0
-	}
-	if unused > 7 || len(frame) < 8 {
-		delete(o.transfers, channelKey)
-		return nil, fmt.Errorf("truncated SDO segment for node %d", nodeID)
 	}
 	transfer.data = append(transfer.data, frame[1:8-unused]...)
 	transfer.toggle = !transfer.toggle
@@ -183,15 +162,12 @@ func objectAddress(frame []byte) (uint16, uint8) {
 	return uint16(frame[1]) | uint16(frame[2])<<8, frame[3]
 }
 
-func expeditedData(command byte, frame []byte) ([]byte, error) {
-	if len(frame) < 8 {
-		return nil, fmt.Errorf("truncated expedited SDO transfer")
-	}
+func expeditedData(command byte, frame []byte) []byte {
 	if command&0x01 == 0 {
-		return append([]byte(nil), frame[4:8]...), nil
+		return append([]byte(nil), frame[4:8]...)
 	}
 	unused := int((command >> 2) & 0x03)
-	return append([]byte(nil), frame[4:8-unused]...), nil
+	return append([]byte(nil), frame[4:8-unused]...)
 }
 
 func complete(transfer *transfer, data []byte) *Event {
