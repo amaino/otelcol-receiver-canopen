@@ -24,13 +24,14 @@ type Event struct {
 }
 
 type transfer struct {
-	nodeID    uint8
-	direction Direction
-	operation string
-	index     uint16
-	subIndex  uint8
-	toggle    bool
-	data      []byte
+	nodeID          uint8
+	direction       Direction
+	operation       string
+	index           uint16
+	subIndex        uint8
+	uploadInitiated bool
+	toggle          bool
+	data            []byte
 }
 
 // Observer retains enough SDO state to reconstruct one standard transfer per
@@ -117,6 +118,13 @@ func (o *Observer) observeServer(channelKey uint32, nodeID uint8, command byte, 
 		return nil, nil
 	}
 	if transfer.operation == "upload" && command&0xE0 == 0x40 {
+		if len(frame) < 4 {
+			return nil, fmt.Errorf("truncated SDO upload response for node %d", nodeID)
+		}
+		index, subIndex := objectAddress(frame)
+		if index != transfer.index || subIndex != transfer.subIndex {
+			return nil, nil
+		}
 		if command&0x02 != 0 {
 			data, err := expeditedData(command, frame)
 			if err != nil {
@@ -125,6 +133,7 @@ func (o *Observer) observeServer(channelKey uint32, nodeID uint8, command byte, 
 			delete(o.transfers, channelKey)
 			return complete(transfer, data), nil
 		}
+		transfer.uploadInitiated = true
 		return nil, nil
 	}
 	if transfer.operation == "download" && command == 0x60 {
@@ -139,6 +148,9 @@ func (o *Observer) observeServer(channelKey uint32, nodeID uint8, command byte, 
 func (o *Observer) observeSegment(channelKey uint32, nodeID uint8, direction Direction, command byte, frame []byte) (*Event, error) {
 	transfer := o.transfers[channelKey]
 	if transfer == nil || transfer.direction != direction {
+		return nil, nil
+	}
+	if transfer.operation == "upload" && !transfer.uploadInitiated {
 		return nil, nil
 	}
 	if len(frame) < 1 {

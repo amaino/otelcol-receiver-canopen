@@ -128,6 +128,9 @@ this is validated at startup.
 
 Standard CANopen SDO config is split into `sdo.sniff` (passive observation)
 and `sdo.poll` (active uploads, including expedited and segmented responses).
+Upload initiation responses must match the pending request's index and
+subindex. Mismatched responses are ignored without clearing the request, and
+upload segments are accepted only after a matching initiation response.
 
 #### SDO channels (`sdo.sniff.channels[]`)
 
