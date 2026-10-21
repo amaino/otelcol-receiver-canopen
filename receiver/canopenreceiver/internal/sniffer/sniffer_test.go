@@ -135,8 +135,8 @@ func TestSniffer_SDOChannelsSameNode(t *testing.T) {
 	})
 	logs := emit.NewLogsBuilder()
 
-	s.HandleFrame(cantransport.Frame{ID: 0x601, Data: []byte{0x40, 0x01, 0x20, 0x00}}, nil, logs)
-	s.HandleFrame(cantransport.Frame{ID: 0x611, Data: []byte{0x40, 0x01, 0x20, 0x00}}, nil, logs)
+	s.HandleFrame(cantransport.Frame{ID: 0x601, Data: []byte{0x40, 0x01, 0x20, 0x00, 0, 0, 0, 0}}, nil, logs)
+	s.HandleFrame(cantransport.Frame{ID: 0x611, Data: []byte{0x40, 0x01, 0x20, 0x00, 0, 0, 0, 0}}, nil, logs)
 	s.HandleFrame(cantransport.Frame{ID: 0x581, Data: []byte{0x43, 0x01, 0x20, 0x00, 1, 0, 0, 0}}, nil, logs)
 	s.HandleFrame(cantransport.Frame{ID: 0x591, Data: []byte{0x43, 0x01, 0x20, 0x00, 2, 0, 0, 0}}, nil, logs)
 
@@ -211,9 +211,9 @@ func TestSniffer_TypedSDOObjectStruct(t *testing.T) {
 
 	// Expedited 4-byte upload only carries 4 payload bytes; use segmented
 	// upload to carry all 7 bytes (x=1, y=2, z=3, pin_code=0x11223344).
-	s.HandleFrame(cantransport.Frame{ID: 0x601, Data: []byte{0x40, 0x60, 0x21, 0x01}}, nil, logs)
+	s.HandleFrame(cantransport.Frame{ID: 0x601, Data: []byte{0x40, 0x60, 0x21, 0x01, 0, 0, 0, 0}}, nil, logs)
 	s.HandleFrame(cantransport.Frame{ID: 0x581, Data: []byte{0x41, 0x60, 0x21, 0x01, 7, 0, 0, 0}}, nil, logs)
-	s.HandleFrame(cantransport.Frame{ID: 0x601, Data: []byte{0x60}}, nil, logs)
+	s.HandleFrame(cantransport.Frame{ID: 0x601, Data: []byte{0x60, 0, 0, 0, 0, 0, 0, 0}}, nil, logs)
 	// t=0, n=0 (all 7 bytes valid), c=1 (last segment) -> command byte 0x01.
 	s.HandleFrame(cantransport.Frame{ID: 0x581, Data: []byte{0x01, 1, 2, 3, 0x44, 0x33, 0x22, 0x11}}, metrics, logs)
 
@@ -262,14 +262,14 @@ func TestSniffer_SDOReassemblesSegmentedUpload(t *testing.T) {
 
 	// Upload object 0x2001:00 in two segments: "hello w" + "orld".
 	s.HandleFrame(
-		cantransport.Frame{ID: 0x601, Data: []byte{0x40, 0x01, 0x20, 0x00}},
+		cantransport.Frame{ID: 0x601, Data: []byte{0x40, 0x01, 0x20, 0x00, 0, 0, 0, 0}},
 		nil,
 		logs,
 	)
 	s.HandleFrame(cantransport.Frame{ID: 0x581, Data: []byte{0x41, 0x01, 0x20, 0x00, 11, 0, 0, 0}}, nil, logs)
-	s.HandleFrame(cantransport.Frame{ID: 0x601, Data: []byte{0x60}}, nil, logs)
+	s.HandleFrame(cantransport.Frame{ID: 0x601, Data: []byte{0x60, 0, 0, 0, 0, 0, 0, 0}}, nil, logs)
 	s.HandleFrame(cantransport.Frame{ID: 0x581, Data: []byte{0x00, 'h', 'e', 'l', 'l', 'o', ' ', 'w'}}, nil, logs)
-	s.HandleFrame(cantransport.Frame{ID: 0x601, Data: []byte{0x70}}, nil, logs)
+	s.HandleFrame(cantransport.Frame{ID: 0x601, Data: []byte{0x70, 0, 0, 0, 0, 0, 0, 0}}, nil, logs)
 	s.HandleFrame(cantransport.Frame{ID: 0x581, Data: []byte{0x17, 'o', 'r', 'l', 'd', 0, 0, 0}}, nil, logs)
 
 	require.False(t, logs.Empty())
